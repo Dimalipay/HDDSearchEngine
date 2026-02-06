@@ -1,82 +1,179 @@
 package org.example;
 
-import org.apache.lucene.analysis.ru.RussianAnalyzer;
+import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.document.*;
 import org.apache.lucene.index.*;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.store.FSDirectory;
-import org.apache.tika.Tika;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.example.analysis.AnalyzerProvider;
+import org.example.config.SearchConfig;
+import org.example.tika.TikaService;
 
 import java.io.IOException;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Set;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiConsumer;
 
 public class IndexerService {
     private static final Logger logger = LoggerFactory.getLogger(IndexerService.class);
 
     private final Path indexPath;
-    private final Tika tika = new Tika();
-    private final RussianAnalyzer analyzer = new RussianAnalyzer();
+    private final Analyzer analyzer;
+    private final SearchConfig config;
 
-    // Расширения, которые мы полностью игнорируем
     private static final Set<String> SKIP_EXTENSIONS = Set.of(
-            "zip", "rar", "7z", "tar", "gz", "iso", "exe", "dll", "sys", "tmp"
+            "jpg", "jpeg", "png", "gif", "bmp", "tiff", "ico", "svg", "webp",
+            "mp4", "mkv", "avi", "mov", "mp3", "wav", "flac",
+            "zip", "rar", "7z", "iso", "exe", "dll", "sys", "tmp", "db"
     );
 
-    public IndexerService(String indexPath) {
-        this.indexPath = Paths.get(indexPath);
+    public IndexerService(SearchConfig config) {
+        this.config = config;
+        this.indexPath = config.getIndexPath();
+        this.analyzer = AnalyzerProvider.get();
     }
 
-    public void runIncrementalIndexing(String dataPath) throws IOException {
+    public void runIncrementalIndexing(String dataPath, BiConsumer<Integer, String> onProgress) throws IOException {
         if (!Files.exists(indexPath)) {
             Files.createDirectories(indexPath);
         }
 
-        try (FSDirectory dir = FSDirectory.open(indexPath);
-             IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig(analyzer))) {
+        TikaService tikaService = new TikaService(config.getTikaMaxStringLength(), config.getTikaTimeoutSeconds());
+        IndexWriterConfig config = new IndexWriterConfig(analyzer);
+        config.setRAMBufferSizeMB(this.config.getRamBufferSizeMB());
+        config.setOpenMode(IndexWriterConfig.OpenMode.CREATE_OR_APPEND);
 
-            // Открываем Reader для проверки метаданных уже существующих в индексе файлов
-            // Если индекс пустой, DirectoryReader выбросит IndexNotFoundException
+        try (FSDirectory dir = FSDirectory.open(indexPath);
+             IndexWriter writer = new IndexWriter(dir, config)) {
+
             try (DirectoryReader reader = getReader(dir, writer)) {
+
+                // ПУНКТ 3: Удаляем из индекса файлы, которые физически удалены с диска
+                if (reader != null) {
+                    cleanDeletedFiles(writer, reader);
+                }
+
                 IndexSearcher searcher = (reader != null) ? new IndexSearcher(reader) : null;
+                AtomicInteger counter = new AtomicInteger(0);
+
+                // УСКОРЕНИЕ: Создаем пул потоков по количеству доступных ядер
+                ExecutorService executor = Executors.newFixedThreadPool(this.config.getIndexingThreads());
 
                 Files.walkFileTree(Paths.get(dataPath), new SimpleFileVisitor<>() {
                     @Override
-                    public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                        String pathString = file.toAbsolutePath().toString();
-
-                        if (shouldSkip(pathString)) return FileVisitResult.CONTINUE;
-
-                        long lastModified = attrs.lastModifiedTime().toMillis();
-
-                        // Проверка: нужно ли читать файл с HDD?
-                        if (searcher != null && !isModified(searcher, pathString, lastModified)) {
-                            return FileVisitResult.CONTINUE; // Файл не изменился
-                        }
-
-                        indexFile(writer, file, lastModified);
+                    public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                        // Отправляем файл на обработку в свободный поток
+                        executor.submit(() -> {
+                            try {
+                                processFile(writer, searcher, file, attrs, counter, onProgress, tikaService);
+                            } catch (Exception e) {
+                                logger.error("Ошибка обработки: " + file, e);
+                            }
+                        });
                         return FileVisitResult.CONTINUE;
                     }
 
                     @Override
                     public FileVisitResult visitFileFailed(Path file, IOException exc) {
-                        logger.error("Ошибка доступа к файлу {}: {}", file, exc.getMessage());
                         return FileVisitResult.CONTINUE;
                     }
                 });
+
+                // Ждем завершения всех потоков (может занять время на 450 ГБ)
+                executor.shutdown();
+                executor.awaitTermination(7, TimeUnit.DAYS);
             }
+
+            // Финальный коммит и оптимизация индекса (ForceMerge)
             writer.commit();
+            if (writer.hasDeletions()) {
+                writer.forceMerge(1); // Полезно для очень больших индексов
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            logger.error("Индексация была прервана пользователем");
+        } finally {
+            tikaService.close();
         }
+    }
+
+    private void cleanDeletedFiles(IndexWriter writer, DirectoryReader reader) throws IOException {
+        int deletedCount = 0;
+        for (int i = 0; i < reader.maxDoc(); i++) {
+            Document doc = reader.storedFields().document(i);
+            String pathString = doc.get("path");
+            if (pathString != null && !Files.exists(Paths.get(pathString))) {
+                writer.deleteDocuments(new Term("path", pathString));
+                deletedCount++;
+            }
+        }
+        if (deletedCount > 0) {
+            writer.commit();
+            logger.info("Очищено удаленных файлов из индекса: {}", deletedCount);
+        }
+    }
+
+    private void processFile(IndexWriter writer, IndexSearcher searcher, Path file,
+                             BasicFileAttributes attrs, AtomicInteger counter,
+                             BiConsumer<Integer, String> onProgress,
+                             TikaService tikaService) throws Exception {
+
+        String pathString = file.toAbsolutePath().toString();
+        if (shouldSkip(pathString)) return;
+
+        long lastModified = attrs.lastModifiedTime().toMillis();
+
+        // Проверяем: изменился ли файл или он уже есть в индексе?
+        if (searcher != null && !isModified(searcher, pathString, lastModified)) {
+            return;
+        }
+
+        indexFile(writer, file, lastModified, tikaService);
+
+        int currentCount = counter.incrementAndGet();
+        // Чтобы GUI не зависал от миллионов обновлений, уведомляем раз в 100 файлов
+        if (onProgress != null && currentCount % 100 == 0) {
+            onProgress.accept(currentCount, file.getFileName().toString());
+        }
+    }
+
+    private void indexFile(IndexWriter writer, Path path, long lastModified, TikaService tikaService) {
+        try {
+            Document doc = new Document();
+            String originalName = path.getFileName().toString();
+            String searchableName = originalName.replace("_", " ").replace("-", " ");
+
+            doc.add(new StringField("path", path.toString(), Field.Store.YES));
+            doc.add(new TextField("filename", searchableName, Field.Store.YES));
+            doc.add(new StoredField("display_name", originalName));
+            doc.add(new StoredField("modified", lastModified));
+            doc.add(new NumericDocValuesField("modified", lastModified));
+
+            String content = tikaService.parseToString(path);
+            if (content != null && !content.isBlank()) {
+                doc.add(new TextField("content", content, Field.Store.NO));
+            }
+
+            writer.updateDocument(new Term("path", path.toString()), doc);
+        } catch (Exception e) {
+            logger.warn("Файл пропущен (Tika не смогла прочитать): {}", path);
+        }
+    }
+
+    // Совместимость со старым вызовом
+    public void runIncrementalIndexing(String dataPath) throws IOException {
+        runIncrementalIndexing(dataPath, null);
     }
 
     private DirectoryReader getReader(FSDirectory dir, IndexWriter writer) {
         try {
-            // Пытаемся открыть Reader. Если индекса нет — это нормально для первого запуска.
             return DirectoryReader.open(writer);
         } catch (IOException e) {
             return null;
@@ -84,57 +181,21 @@ public class IndexerService {
     }
 
     private boolean isModified(IndexSearcher searcher, String path, long currentModified) throws IOException {
-        // Поиск документа по уникальному пути
         TermQuery query = new TermQuery(new Term("path", path));
         TopDocs topDocs = searcher.search(query, 1);
 
         if (topDocs.totalHits.value > 0) {
-            // Lucene 9 API: использование storedFields() для получения документа
             Document doc = searcher.storedFields().document(topDocs.scoreDocs[0].doc);
             IndexableField modField = doc.getField("modified");
-
             if (modField != null && modField.numericValue() != null) {
-                long indexedTime = modField.numericValue().longValue();
-                return indexedTime != currentModified;
+                return modField.numericValue().longValue() != currentModified;
             }
         }
-        return true; // Файла нет в индексе или данных недостаточно
-    }
-
-    private void indexFile(IndexWriter writer, Path path, long lastModified) {
-        try {
-            Document doc = new Document();
-            String originalName = path.getFileName().toString();
-
-            // ФИКС: Создаем "очищенное" имя для поиска
-            // Заменяем подчеркивания и тире на пробелы, чтобы Lucene разбил их на слова
-            String searchableName = originalName.replace("_", " ").replace("-", " ");
-
-            doc.add(new StringField("path", path.toString(), Field.Store.YES));
-
-            // В filename кладем очищенную строку
-            doc.add(new TextField("filename", searchableName, Field.Store.YES));
-
-            // Оставляем оригинальное имя в отдельном поле, если захотим его просто отображать без изменений
-            doc.add(new StoredField("display_name", originalName));
-
-            doc.add(new StoredField("modified", lastModified));
-            doc.add(new NumericDocValuesField("modified", lastModified));
-
-            String content = tika.parseToString(path);
-            if (content != null && !content.isBlank()) {
-                doc.add(new TextField("content", content, Field.Store.NO));
-            }
-
-            writer.updateDocument(new Term("path", path.toString()), doc);
-        } catch (Exception e) {
-            logger.warn("Ошибка индексации: " + path);
-        }
+        return true;
     }
 
     private boolean shouldSkip(String path) {
         String lower = path.toLowerCase();
-        // Пропускаем архивы, временные файлы Office и системные папки
         return SKIP_EXTENSIONS.stream().anyMatch(lower::endsWith)
                 || path.contains("~")
                 || lower.contains("$recycle.bin")
