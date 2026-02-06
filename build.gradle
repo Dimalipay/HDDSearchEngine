@@ -1,0 +1,64 @@
+plugins {
+    id 'java'
+    id 'application'
+    // Плагин для JavaFX: автоматически управляет платформозависимыми библиотеками
+    id 'org.openjfx.javafxplugin' version '0.0.13'
+}
+
+group = 'org.example'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+// Настройка Java 17
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+// Настройка JavaFX
+javafx {
+    version = "17.0.9"
+    // Добавляем javafx.web в список модулей
+    modules = [ 'javafx.controls', 'javafx.fxml', 'javafx.web' ]
+}
+
+// Принудительная кодировка UTF-8 для компиляции и запуска
+tasks.withType(JavaCompile) {
+    options.encoding = 'UTF-8'
+}
+
+application {
+    // Точка входа в приложение
+    mainClass = 'org.example.MainApp'
+}
+
+dependencies {
+    // --- Apache Lucene 9.9.1 (Поиск и индексация) ---
+    implementation 'org.apache.lucene:lucene-core:9.9.1'
+    implementation 'org.apache.lucene:lucene-analysis-common:9.9.1'
+    implementation 'org.apache.lucene:lucene-queryparser:9.9.1'
+
+    // --- Apache Tika (Парсинг документов: Excel, Word, PDF) ---
+    implementation 'org.apache.tika:tika-core:2.9.1'
+    implementation 'org.apache.tika:tika-parsers-standard-package:2.9.1'
+
+    // --- Логирование (устраняет ошибки SLF4J и Log4j2 в консоли) ---
+    implementation 'org.apache.logging.log4j:log4j-core:2.20.0'
+    implementation 'org.apache.logging.log4j:log4j-api:2.20.0'
+    implementation 'org.apache.logging.log4j:log4j-slf4j2-impl:2.20.0'
+    implementation 'org.slf4j:slf4j-api:2.0.7'
+    implementation 'org.slf4j:slf4j-simple:2.0.7'
+    implementation 'org.apache.lucene:lucene-highlighter:9.9.1'
+    implementation 'org.openjfx:javafx-web:17.0.9'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.2'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.9.2'
+}
+
+test {
+    useJUnitPlatform()
+}
