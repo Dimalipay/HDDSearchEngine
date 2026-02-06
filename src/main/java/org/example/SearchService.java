@@ -9,6 +9,7 @@ import org.apache.lucene.search.*;
 import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.search.highlight.*;
 import org.apache.tika.Tika;
+import java.io.File;
 
 import java.io.IOException;
 import java.nio.file.Paths;
@@ -62,16 +63,30 @@ public class SearchService {
 
     public List<FileResult> searchInFields(String keyword, String field) throws Exception {
         List<FileResult> list = new ArrayList<>();
-        try (FSDirectory directory = FSDirectory.open(Paths.get(indexPath));
-             DirectoryReader reader = DirectoryReader.open(directory)) {
 
-            IndexSearcher searcher = new IndexSearcher(reader);
-            Query query = new org.apache.lucene.queryparser.classic.QueryParser(field, analyzer).parse(keyword);
-            TopDocs hits = searcher.search(query, 50);
+        try (FSDirectory directory = FSDirectory.open(Paths.get(indexPath))) {
+            if (!DirectoryReader.indexExists(directory)) return list;
 
-            for (ScoreDoc scoreDoc : hits.scoreDocs) {
-                var doc = searcher.storedFields().document(scoreDoc.doc);
-                list.add(new FileResult(doc.get("filename"), doc.get("path")));
+            try (DirectoryReader reader = DirectoryReader.open(directory)) {
+                IndexSearcher searcher = new IndexSearcher(reader);
+
+                // Настройка парсера
+                QueryParser parser = new QueryParser(field, analyzer);
+
+                // Разрешаем оператор "И" по умолчанию, чтобы слова без кавычек
+                // искались более строго (если нужно), но для фраз это не критично
+                parser.setDefaultOperator(QueryParser.Operator.AND);
+
+                // Создаем запрос. Если в keyword есть кавычки, Lucene поймет, что это фраза.
+                Query query = parser.parse(keyword);
+
+                TopDocs hits = searcher.search(query, 100);
+
+                for (ScoreDoc scoreDoc : hits.scoreDocs) {
+                    Document doc = searcher.storedFields().document(scoreDoc.doc);
+                    String nameToShow = doc.get("display_name") != null ? doc.get("display_name") : doc.get("filename");
+                    list.add(new FileResult(nameToShow, doc.get("path")));
+                }
             }
         }
         return list;
@@ -80,26 +95,32 @@ public class SearchService {
     public String getHighlights(String filePath, String searchTerm) {
         try {
             Tika tika = new Tika();
-            String content = tika.parseToString(Paths.get(filePath));
+            // Ограничиваем чтение текста для предпросмотра (первые 100к символов),
+            // чтобы не "вешать" GUI на гигантских файлах
+            String content = tika.parseToString(new File(filePath));
 
-            // Настраиваем подсветку: искомое слово будет в тегах <B>
             Formatter formatter = new SimpleHTMLFormatter("<B style='color:red;'>", "</B>");
-            Query query = new QueryParser("content", analyzer).parse(searchTerm);
+
+            // Используем тот же QueryParser, что и при поиске
+            QueryParser parser = new QueryParser("content", analyzer);
+            Query query = parser.parse(searchTerm);
+
             QueryScorer scorer = new QueryScorer(query);
             Highlighter highlighter = new Highlighter(formatter, scorer);
 
-            // Разбиваем текст на фрагменты
+            // Фрагментация текста
             Fragmenter fragmenter = new SimpleSpanFragmenter(scorer, 150);
             highlighter.setTextFragmenter(fragmenter);
 
-            // Получаем до 5 лучших фрагментов, разделенных многоточием
             String[] fragments = highlighter.getBestFragments(analyzer, "content", content, 5);
 
-            if (fragments.length == 0) return "Совпадений в тексте не найдено (возможно, совпадение только в имени файла).";
+            if (fragments == null || fragments.length == 0) {
+                return "Фраза найдена в названии или метаданных, но не в тексте.";
+            }
 
-            return String.join("\n... \n", fragments);
+            return String.join("<br>...<br>", fragments);
         } catch (Exception e) {
-            return "Не удалось извлечь фрагменты: " + e.getMessage();
+            return "Ошибка подсветки: " + e.getMessage();
         }
     }
 }

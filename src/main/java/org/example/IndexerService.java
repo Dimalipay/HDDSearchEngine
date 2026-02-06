@@ -32,10 +32,6 @@ public class IndexerService {
         this.indexPath = Paths.get(indexPath);
     }
 
-    /**
-     * Запуск процесса индексации.
-     * @param dataPath Путь к внешнему HDD.
-     */
     public void runIncrementalIndexing(String dataPath) throws IOException {
         if (!Files.exists(indexPath)) {
             Files.createDirectories(indexPath);
