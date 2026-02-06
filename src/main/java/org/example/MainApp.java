@@ -6,9 +6,6 @@ import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import javafx.geometry.Insets;
 import javafx.scene.Scene;
-import javafx.scene.control.Button;
-import javafx.scene.control.Label;
-import javafx.scene.control.TextField;
 import javafx.scene.control.*;
 import javafx.scene.control.cell.PropertyValueFactory;
 import javafx.scene.layout.HBox;
@@ -18,7 +15,7 @@ import javafx.scene.web.WebView;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.Stage;
 
-import java.awt.*;
+import java.awt.Desktop;
 import java.io.File;
 import java.io.IOException;
 
@@ -49,8 +46,13 @@ public class MainApp extends Application {
         pb.setPrefWidth(200);
 
         TextField searchField = new TextField();
-        searchField.setPromptText("Введите ключевое слово...");
+        searchField.setPromptText("Введите ключевое слово (используйте \"\" для точных фраз)...");
         Button btnSearch = new Button("Найти");
+
+        // Статус-бар для отслеживания прогресса
+        Label statusLabel = new Label("Ожидание запуска...");
+        statusLabel.setStyle("-fx-text-fill: #555; -fx-font-size: 11px;");
+        statusLabel.setMaxWidth(Double.MAX_VALUE);
 
         // 3. ОБЛАСТЬ ПРЕДПРОСМОТРА
         WebView previewArea = new WebView();
@@ -74,18 +76,27 @@ public class MainApp extends Application {
             }
             btnIndex.setDisable(true);
             pb.setProgress(-1);
+
             new Thread(() -> {
                 try {
-                    new IndexerService(ssdPath).runIncrementalIndexing(hddPath);
+                    // Передаем лямбду (count, fileName) для обновления статус-бара
+                    new IndexerService(ssdPath).runIncrementalIndexing(hddPath, (count, fileName) -> {
+                        Platform.runLater(() -> {
+                            statusLabel.setText(String.format("Обработано файлов: %,d | Сейчас: %s", count, fileName));
+                        });
+                    });
+
                     Platform.runLater(() -> {
                         pb.setProgress(1);
                         btnIndex.setDisable(false);
+                        statusLabel.setText("Индексация успешно завершена!");
                         showAlert("Готово", "Индексация завершена!");
                     });
                 } catch (Exception ex) {
                     Platform.runLater(() -> {
                         btnIndex.setDisable(false);
                         pb.setProgress(0);
+                        statusLabel.setText("Ошибка: " + ex.getMessage());
                         showAlert("Ошибка", ex.getMessage());
                     });
                 }
@@ -94,13 +105,14 @@ public class MainApp extends Application {
 
         btnSearch.setOnAction(e -> performSearch(searchField.getText()));
 
-        // 5. СЛУШАТЕЛИ КЛИКОВ (Теперь таблицы созданы и доступны)
+        // 5. СЛУШАТЕЛИ КЛИКОВ
         setupSelectionListener(nameTable, searchField, previewArea);
         setupSelectionListener(contentTable, searchField, previewArea);
 
         // 6. КОМПОНОВКА (Layout)
         VBox leftPane = new VBox(10,
                 new HBox(10, btnSelectHDD, hddLabel, btnIndex, pb),
+                statusLabel, // Статус-бар под кнопками индексации
                 new HBox(10, searchField, btnSearch),
                 new Label("Поиск по именам:"), nameTable,
                 new Label("Поиск по тексту:"), contentTable
@@ -165,6 +177,7 @@ public class MainApp extends Application {
                 String path = newSelection.getPath();
 
                 new Thread(() -> {
+                    // Используем SearchService для получения HTML-фрагментов с подсветкой
                     String htmlSnippets = new SearchService(ssdPath).getHighlights(path, keyword);
                     Platform.runLater(() -> preview.getEngine().loadContent(
                             "<html><body style='font-family: sans-serif; font-size: 13px;'>" +
