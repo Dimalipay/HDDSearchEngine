@@ -63,9 +63,6 @@ public class SearchService {
         }
     }
 
-    /**
-     * Основной метод поиска для GUI
-     */
     public List<FileResult> searchInFields(String keyword, String field) throws Exception {
         List<FileResult> list = new ArrayList<>();
 
@@ -77,16 +74,20 @@ public class SearchService {
 
                 QueryParser parser = new QueryParser(field, analyzer);
 
-                // Используем AND, чтобы поиск из нескольких слов был точнее.
-                // Для поиска фразы (в кавычках) это не помешает.
+                // 1. Используем AND: поиск "договор ромашка" найдет файлы, где есть ОБА слова.
                 parser.setDefaultOperator(QueryParser.Operator.AND);
+
+                // 2. ПУНКТ 4: Устанавливаем Phrase Slop.
+                // Значение 2 означает, что в фразе "№1 договор" между №1 и словом договор
+                // может стоять до 2-х других слов (например, "№1 срочный договор").
+                parser.setPhraseSlop(2);
 
                 Query query = parser.parse(keyword);
                 TopDocs hits = searcher.search(query, 100);
 
                 for (ScoreDoc scoreDoc : hits.scoreDocs) {
                     Document doc = searcher.storedFields().document(scoreDoc.doc);
-                    // Берем display_name для красивого отображения в таблице (с _ и -)
+                    // Берем display_name для красивого отображения в таблице
                     String nameToShow = doc.get("display_name") != null ? doc.get("display_name") : doc.get("filename");
                     list.add(new FileResult(nameToShow, doc.get("path")));
                 }
