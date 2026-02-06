@@ -2,6 +2,10 @@ package org.example;
 
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.LowerCaseFilter;
+import org.apache.lucene.analysis.ru.RussianAnalyzer;
+import org.apache.lucene.analysis.standard.StandardTokenizer;
+import org.apache.lucene.analysis.TokenStream;
+import org.apache.lucene.analysis.LowerCaseFilter;
 import org.apache.lucene.analysis.standard.StandardTokenizer;
 import org.apache.lucene.document.*;
 import org.apache.lucene.index.*;
@@ -27,14 +31,7 @@ public class IndexerService {
     private final Path indexPath;
     private final Tika tika = new Tika();
 
-    // КАСТОМНЫЙ АНАЛИЗАТОР: Сохраняет спецсимволы (№, @, $) и переводит в нижний регистр
-    private final Analyzer analyzer = new Analyzer() {
-        @Override
-        protected TokenStreamComponents createComponents(String fieldName) {
-            StandardTokenizer src = new StandardTokenizer();
-            return new TokenStreamComponents(src, new LowerCaseFilter(src));
-        }
-    };
+    private final Analyzer analyzer = new RussianAnalyzer();
 
     private static final Set<String> SKIP_EXTENSIONS = Set.of(
             "jpg", "jpeg", "png", "gif", "bmp", "tiff", "ico", "svg", "webp",

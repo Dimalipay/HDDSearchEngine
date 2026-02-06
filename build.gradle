@@ -41,18 +41,18 @@ dependencies {
     implementation 'org.apache.lucene:lucene-core:9.9.1'
     implementation 'org.apache.lucene:lucene-analysis-common:9.9.1'
     implementation 'org.apache.lucene:lucene-queryparser:9.9.1'
+    implementation 'org.apache.lucene:lucene-highlighter:9.9.1'
 
     // --- Apache Tika (Парсинг документов: Excel, Word, PDF) ---
-    implementation 'org.apache.tika:tika-core:2.9.1'
+    implementation 'org.apache.tika:tika-core:3.2.2'
     implementation 'org.apache.tika:tika-parsers-standard-package:2.9.1'
 
     // --- Логирование (устраняет ошибки SLF4J и Log4j2 в консоли) ---
-    implementation 'org.apache.logging.log4j:log4j-core:2.20.0'
+    implementation 'org.apache.logging.log4j:log4j-core:2.25.3'
     implementation 'org.apache.logging.log4j:log4j-api:2.20.0'
     implementation 'org.apache.logging.log4j:log4j-slf4j2-impl:2.20.0'
     implementation 'org.slf4j:slf4j-api:2.0.7'
     implementation 'org.slf4j:slf4j-simple:2.0.7'
-    implementation 'org.apache.lucene:lucene-highlighter:9.9.1'
     implementation 'org.openjfx:javafx-web:17.0.9'
 
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.2'
