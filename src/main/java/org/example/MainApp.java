@@ -14,14 +14,22 @@ import javafx.scene.layout.VBox;
 import javafx.scene.web.WebView;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.Stage;
+import org.example.config.SearchConfig;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.awt.Desktop;
 import java.io.File;
 import java.io.IOException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainApp extends Application {
 
-    private String ssdPath = "D:/SearchIndex";
+    private static final Logger logger = LoggerFactory.getLogger(MainApp.class);
+
+    private final SearchConfig config = SearchConfig.load();
+    private final ExecutorService backgroundExecutor = Executors.newCachedThreadPool();
     private String hddPath = "";
 
     private final ObservableList<FileResult> nameResults = FXCollections.observableArrayList();
@@ -29,6 +37,7 @@ public class MainApp extends Application {
 
     @Override
     public void start(Stage primaryStage) {
+        logger.info("Запуск приложения. Lucene: {}", config.getLuceneVersion());
         primaryStage.setTitle("HDD Search Engine (Lucene 9)");
 
         // 1. СНАЧАЛА СОЗДАЕМ ТАБЛИЦЫ
@@ -80,7 +89,7 @@ public class MainApp extends Application {
             new Thread(() -> {
                 try {
                     // Передаем лямбду (count, fileName) для обновления статус-бара
-                    new IndexerService(ssdPath).runIncrementalIndexing(hddPath, (count, fileName) -> {
+                    new IndexerService(config).runIncrementalIndexing(hddPath, (count, fileName) -> {
                         Platform.runLater(() -> {
                             statusLabel.setText(String.format("Обработано файлов: %,d | Сейчас: %s", count, fileName));
                         });
@@ -135,13 +144,18 @@ public class MainApp extends Application {
         nameResults.clear();
         contentResults.clear();
 
-        SearchService searcher = new SearchService(ssdPath);
-        try {
-            nameResults.addAll(searcher.searchInFields(query, "filename"));
-            contentResults.addAll(searcher.searchInFields(query, "content"));
-        } catch (Exception ex) {
-            showAlert("Ошибка поиска", ex.getMessage());
-        }
+        backgroundExecutor.execute(() -> {
+            try (SearchService searcher = new SearchService(config)) {
+                var nameHits = searcher.searchInFields(query, "filename");
+                var contentHits = searcher.searchInFields(query, "content");
+                Platform.runLater(() -> {
+                    nameResults.addAll(nameHits);
+                    contentResults.addAll(contentHits);
+                });
+            } catch (Exception ex) {
+                Platform.runLater(() -> showAlert("Ошибка поиска", ex.getMessage()));
+            }
+        });
     }
 
     private TableView<FileResult> createTable(String title) {
@@ -178,7 +192,10 @@ public class MainApp extends Application {
 
                 new Thread(() -> {
                     // Используем SearchService для получения HTML-фрагментов с подсветкой
-                    String htmlSnippets = new SearchService(ssdPath).getHighlights(path, keyword);
+                    String htmlSnippets;
+                    try (SearchService searchService = new SearchService(config)) {
+                        htmlSnippets = searchService.getHighlights(path, keyword);
+                    }
                     Platform.runLater(() -> preview.getEngine().loadContent(
                             "<html><body style='font-family: sans-serif; font-size: 13px;'>" +
                                     "<h3>Фрагменты из файла:</h3>" + htmlSnippets + "</body></html>"
@@ -202,6 +219,11 @@ public class MainApp extends Application {
         alert.setHeaderText(null);
         alert.setContentText(msg);
         alert.showAndWait();
+    }
+
+    @Override
+    public void stop() {
+        backgroundExecutor.shutdownNow();
     }
 
     public static void main(String[] args) {

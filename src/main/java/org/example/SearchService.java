@@ -1,34 +1,36 @@
 package org.example;
 
 import org.apache.lucene.analysis.Analyzer;
-import org.apache.lucene.analysis.TokenStream;
-import org.apache.lucene.analysis.LowerCaseFilter;
-import org.apache.lucene.analysis.ru.RussianAnalyzer;
-import org.apache.lucene.analysis.standard.StandardTokenizer;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.index.DirectoryReader;
-import org.apache.lucene.index.Term;
 import org.apache.lucene.queryparser.classic.QueryParser;
 import org.apache.lucene.search.*;
 import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.search.highlight.*;
-import org.apache.tika.Tika;
+import org.example.analysis.AnalyzerProvider;
+import org.example.config.SearchConfig;
+import org.example.tika.TikaService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
-import java.io.IOException;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 
-public class SearchService {
-    private final String indexPath;
+public class SearchService implements AutoCloseable {
+    private static final Logger logger = LoggerFactory.getLogger(SearchService.class);
+
+    private final SearchConfig config;
 
     // ТОЧНО ТАКОЙ ЖЕ АНАЛИЗАТОР, КАК В INDEXER_SERVICE
     // Это критически важно для того, чтобы поиск находил проиндексированные слова
-    private final Analyzer analyzer = new RussianAnalyzer();
+    private final Analyzer analyzer;
+    private final TikaService tikaService;
 
-    public SearchService(String indexPath) {
-        this.indexPath = indexPath;
+    public SearchService(SearchConfig config) {
+        this.config = config;
+        this.analyzer = AnalyzerProvider.get();
+        this.tikaService = new TikaService(config.getTikaMaxStringLength(), config.getTikaTimeoutSeconds());
     }
 
     /**
@@ -37,7 +39,7 @@ public class SearchService {
     public List<FileResult> searchInFields(String keyword, String field) throws Exception {
         List<FileResult> list = new ArrayList<>();
 
-        try (FSDirectory directory = FSDirectory.open(Paths.get(indexPath))) {
+        try (FSDirectory directory = FSDirectory.open(config.getIndexPath())) {
             if (!DirectoryReader.indexExists(directory)) return list;
 
             try (DirectoryReader reader = DirectoryReader.open(directory)) {
@@ -45,12 +47,10 @@ public class SearchService {
 
                 QueryParser parser = new QueryParser(field, analyzer);
 
-                // ПУНКТ 4: Настройка Slop (гибкость поиска фраз)
-                // Позволяет находить слова, даже если между ними есть 2-3 других слова
-                parser.setPhraseSlop(2);
-
-                // Настройка оператора по умолчанию (AND делает поиск точнее)
-                parser.setDefaultOperator(QueryParser.Operator.AND);
+                parser.setPhraseSlop(config.getPhraseSlop());
+                parser.setDefaultOperator(config.getDefaultOperator() == SearchConfig.DefaultOperator.AND
+                        ? QueryParser.Operator.AND
+                        : QueryParser.Operator.OR);
 
                 Query query = parser.parse(keyword);
                 TopDocs hits = searcher.search(query, 100);
@@ -74,15 +74,13 @@ public class SearchService {
             File file = new File(filePath);
             if (!file.exists()) return "Файл не найден на диске.";
 
-            Tika tika = new Tika();
-            // Читаем только начало файла для быстроты (первые 100к символов)
-            String content = tika.parseToString(file);
+            String content = tikaService.parseToString(file.toPath());
 
             // Настройка HTML-тегов для подсветки
             Formatter formatter = new SimpleHTMLFormatter("<B style='color:red;'>", "</B>");
 
             QueryParser parser = new QueryParser("content", analyzer);
-            parser.setPhraseSlop(2);
+            parser.setPhraseSlop(config.getPhraseSlop());
             Query query = parser.parse(searchTerm);
 
             QueryScorer scorer = new QueryScorer(query);
@@ -101,6 +99,7 @@ public class SearchService {
 
             return String.join("<br>...<br>", fragments);
         } catch (Exception e) {
+            logger.warn("Ошибка предпросмотра для {}: {}", filePath, e.getMessage());
             return "Ошибка предпросмотра: " + e.getMessage();
         }
     }
@@ -109,12 +108,15 @@ public class SearchService {
      * Консольный поиск (для отладки)
      */
     public void searchAndPrint(String keyword) {
-        try (FSDirectory directory = FSDirectory.open(Paths.get(indexPath));
+        try (FSDirectory directory = FSDirectory.open(config.getIndexPath());
              DirectoryReader reader = DirectoryReader.open(directory)) {
 
             IndexSearcher searcher = new IndexSearcher(reader);
             QueryParser parser = new QueryParser("content", analyzer);
-            parser.setPhraseSlop(2);
+            parser.setPhraseSlop(config.getPhraseSlop());
+            parser.setDefaultOperator(config.getDefaultOperator() == SearchConfig.DefaultOperator.AND
+                    ? QueryParser.Operator.AND
+                    : QueryParser.Operator.OR);
             Query query = parser.parse(keyword);
 
             TopDocs hits = searcher.search(query, 10);
@@ -127,5 +129,10 @@ public class SearchService {
         } catch (Exception e) {
             System.err.println("Ошибка отладочного поиска: " + e.getMessage());
         }
+    }
+
+    @Override
+    public void close() {
+        tikaService.close();
     }
 }
