@@ -37,7 +37,7 @@ public class IndexerService {
     public IndexerService(SearchConfig config) {
         this.config = config;
         this.indexPath = config.getIndexPath();
-        this.analyzer = AnalyzerProvider.get();
+        this.analyzer = AnalyzerProvider.getMultilingualAnalyzer();
     }
 
     public void runIncrementalIndexing(String dataPath, BiConsumer<Integer, String> onProgress) throws IOException {
@@ -152,6 +152,8 @@ public class IndexerService {
 
             doc.add(new StringField("path", path.toString(), Field.Store.YES));
             doc.add(new TextField("filename", searchableName, Field.Store.YES));
+            doc.add(new TextField(AnalyzerProvider.FIELD_FILENAME_RU, searchableName, Field.Store.NO));
+            doc.add(new TextField(AnalyzerProvider.FIELD_FILENAME_EN, searchableName, Field.Store.NO));
             doc.add(new StoredField("display_name", originalName));
             doc.add(new StoredField("modified", lastModified));
             doc.add(new NumericDocValuesField("modified", lastModified));
@@ -159,6 +161,8 @@ public class IndexerService {
             String content = tikaService.parseToString(path);
             if (content != null && !content.isBlank()) {
                 doc.add(new TextField("content", content, Field.Store.NO));
+                doc.add(new TextField(AnalyzerProvider.FIELD_CONTENT_RU, content, Field.Store.NO));
+                doc.add(new TextField(AnalyzerProvider.FIELD_CONTENT_EN, content, Field.Store.NO));
             }
 
             writer.updateDocument(new Term("path", path.toString()), doc);
