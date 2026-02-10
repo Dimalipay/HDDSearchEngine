@@ -136,21 +136,4 @@ public class SearchService implements AutoCloseable {
     public void close() {
         tikaService.close();
     }
-
-    private QueryParser createParser(String field) {
-        QueryParser parser;
-        if ("content".equals(field)) {
-            parser = new MultiFieldQueryParser(CONTENT_FIELDS, analyzer);
-        } else if ("filename".equals(field)) {
-            parser = new MultiFieldQueryParser(FILENAME_FIELDS, analyzer);
-        } else {
-            parser = new QueryParser(field, analyzer);
-        }
-
-        parser.setPhraseSlop(config.getPhraseSlop());
-        parser.setDefaultOperator(config.getDefaultOperator() == SearchConfig.DefaultOperator.AND
-                ? QueryParser.Operator.AND
-                : QueryParser.Operator.OR);
-        return parser;
-    }
 }
