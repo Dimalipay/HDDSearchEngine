@@ -13,14 +13,20 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 import javafx.scene.web.WebView;
 import javafx.stage.DirectoryChooser;
+import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 import org.example.config.SearchConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.example.export.ConflictStrategy;
+import org.example.export.ExportResult;
+import org.example.export.ExportService;
 
 import java.awt.Desktop;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Path;
+import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -51,6 +57,7 @@ public class MainApp extends Application {
         Label hddLabel = new Label("HDD не выбран");
         Button btnSelectHDD = new Button("Выбрать HDD");
         Button btnIndex = new Button("Обновить индекс");
+        Button btnExport = new Button("Экспорт найденных файлов");
         ProgressBar pb = new ProgressBar(0);
         pb.setPrefWidth(200);
 
@@ -113,6 +120,7 @@ public class MainApp extends Application {
         });
 
         btnSearch.setOnAction(e -> performSearch(searchField.getText()));
+        btnExport.setOnAction(e -> exportResults(primaryStage, statusLabel, pb, btnExport));
 
         // 5. СЛУШАТЕЛИ КЛИКОВ
         setupSelectionListener(nameTable, searchField, previewArea);
@@ -120,7 +128,7 @@ public class MainApp extends Application {
 
         // 6. КОМПОНОВКА (Layout)
         VBox leftPane = new VBox(10,
-                new HBox(10, btnSelectHDD, hddLabel, btnIndex, pb),
+                new HBox(10, btnSelectHDD, hddLabel, btnIndex, btnExport, pb),
                 statusLabel, // Статус-бар под кнопками индексации
                 new HBox(10, searchField, btnSearch),
                 new Label("Поиск по именам:"), nameTable,
@@ -156,6 +164,108 @@ public class MainApp extends Application {
                 Platform.runLater(() -> showAlert("Ошибка поиска", ex.getMessage()));
             }
         });
+    }
+
+
+    private void exportResults(Stage stage, Label statusLabel, ProgressBar progressBar, Button btnExport) {
+        List<Path> files = collectUniqueResultPaths();
+        if (files.isEmpty()) {
+            showAlert("Экспорт", "Нет найденных файлов для экспорта.");
+            return;
+        }
+
+        ChoiceDialog<String> modeDialog = new ChoiceDialog<>("В папку", "В папку", "В ZIP");
+        modeDialog.setTitle("Экспорт");
+        modeDialog.setHeaderText("Выберите формат экспорта");
+        Optional<String> mode = modeDialog.showAndWait();
+        if (mode.isEmpty()) {
+            return;
+        }
+
+        ExportService exportService = new ExportService();
+        btnExport.setDisable(true);
+        progressBar.setProgress(0);
+
+        if ("В папку".equals(mode.get())) {
+            DirectoryChooser chooser = new DirectoryChooser();
+            chooser.setTitle("Выберите папку для экспорта");
+            File targetDir = chooser.showDialog(stage);
+            if (targetDir == null) {
+                btnExport.setDisable(false);
+                return;
+            }
+
+            ChoiceDialog<String> conflictDialog = new ChoiceDialog<>("Переименовать", "Перезаписать", "Пропустить", "Переименовать");
+            conflictDialog.setTitle("Конфликт файлов");
+            conflictDialog.setHeaderText("Если файл уже существует:");
+            Optional<String> conflictAnswer = conflictDialog.showAndWait();
+            if (conflictAnswer.isEmpty()) {
+                btnExport.setDisable(false);
+                return;
+            }
+
+            ConflictStrategy strategy = switch (conflictAnswer.get()) {
+                case "Перезаписать" -> ConflictStrategy.OVERWRITE;
+                case "Пропустить" -> ConflictStrategy.SKIP;
+                default -> ConflictStrategy.RENAME;
+            };
+
+            backgroundExecutor.execute(() -> {
+                ExportResult result = exportService.exportToDirectory(files, targetDir.toPath(), strategy,
+                        (processed, total) -> Platform.runLater(() -> {
+                            progressBar.setProgress(total == 0 ? 1 : (double) processed / total);
+                            statusLabel.setText(String.format("Экспорт в папку: %d/%d", processed, total));
+                        }));
+
+                Platform.runLater(() -> {
+                    btnExport.setDisable(false);
+                    statusLabel.setText(String.format("Экспорт завершен. Успешно: %d, пропущено: %d, ошибок: %d",
+                            result.exported(), result.skipped(), result.failed()));
+                    showAlert("Экспорт завершен", statusLabel.getText());
+                });
+            });
+        } else {
+            FileChooser fileChooser = new FileChooser();
+            fileChooser.setTitle("Сохранить ZIP-архив");
+            fileChooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("ZIP архив", "*.zip"));
+            fileChooser.setInitialFileName("search-results.zip");
+            File zipFile = fileChooser.showSaveDialog(stage);
+            if (zipFile == null) {
+                btnExport.setDisable(false);
+                return;
+            }
+
+            backgroundExecutor.execute(() -> {
+                ExportResult result = exportService.exportToZip(files, zipFile.toPath(),
+                        (processed, total) -> Platform.runLater(() -> {
+                            progressBar.setProgress(total == 0 ? 1 : (double) processed / total);
+                            statusLabel.setText(String.format("Экспорт в ZIP: %d/%d", processed, total));
+                        }));
+
+                Platform.runLater(() -> {
+                    btnExport.setDisable(false);
+                    statusLabel.setText(String.format("ZIP экспорт завершен. Успешно: %d, ошибок: %d",
+                            result.exported(), result.failed()));
+                    showAlert("Экспорт завершен", statusLabel.getText());
+                });
+            });
+        }
+    }
+
+    private List<Path> collectUniqueResultPaths() {
+        Set<String> unique = new LinkedHashSet<>();
+        for (FileResult result : nameResults) {
+            unique.add(result.getPath());
+        }
+        for (FileResult result : contentResults) {
+            unique.add(result.getPath());
+        }
+
+        List<Path> paths = new ArrayList<>();
+        for (String path : unique) {
+            paths.add(Path.of(path));
+        }
+        return paths;
     }
 
     private TableView<FileResult> createTable(String title) {
