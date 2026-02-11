@@ -3,6 +3,8 @@ package org.example;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.MultiReader;
 import org.apache.lucene.queryparser.classic.MultiFieldQueryParser;
 import org.apache.lucene.queryparser.classic.QueryParser;
 import org.apache.lucene.search.*;
@@ -15,6 +17,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -36,9 +39,15 @@ public class SearchService implements AutoCloseable {
     private final SearchConfig config;
     private final Analyzer analyzer;
     private final TikaService tikaService;
+    private final List<Path> indexPaths;
 
     public SearchService(SearchConfig config) {
+        this(config, List.of(config.getIndexPath()));
+    }
+
+    public SearchService(SearchConfig config, List<Path> indexPaths) {
         this.config = config;
+        this.indexPaths = indexPaths;
         this.analyzer = AnalyzerProvider.getMultilingualAnalyzer();
         this.tikaService = new TikaService(config.getTikaMaxStringLength(), config.getTikaTimeoutSeconds());
     }
@@ -46,21 +55,20 @@ public class SearchService implements AutoCloseable {
     public List<FileResult> searchInFields(String keyword, String field) throws Exception {
         List<FileResult> list = new ArrayList<>();
 
-        try (FSDirectory directory = FSDirectory.open(config.getIndexPath())) {
-            if (!DirectoryReader.indexExists(directory)) return list;
+        try (IndexReader reader = openCombinedReader()) {
+            if (reader == null) {
+                return list;
+            }
 
-            try (DirectoryReader reader = DirectoryReader.open(directory)) {
-                IndexSearcher searcher = new IndexSearcher(reader);
+            IndexSearcher searcher = new IndexSearcher(reader);
+            QueryParser parser = createParser(field);
+            Query query = parser.parse(keyword);
+            TopDocs hits = searcher.search(query, 100);
 
-                QueryParser parser = createParser(field);
-                Query query = parser.parse(keyword);
-                TopDocs hits = searcher.search(query, 100);
-
-                for (ScoreDoc scoreDoc : hits.scoreDocs) {
-                    Document doc = searcher.storedFields().document(scoreDoc.doc);
-                    String nameToShow = doc.get("display_name") != null ? doc.get("display_name") : doc.get("filename");
-                    list.add(new FileResult(nameToShow, doc.get("path")));
-                }
+            for (ScoreDoc scoreDoc : hits.scoreDocs) {
+                Document doc = searcher.storedFields().document(scoreDoc.doc);
+                String nameToShow = doc.get("display_name") != null ? doc.get("display_name") : doc.get("filename");
+                list.add(new FileResult(nameToShow, doc.get("path")));
             }
         }
         return list;
@@ -113,9 +121,11 @@ public class SearchService implements AutoCloseable {
     }
 
     public void searchAndPrint(String keyword) {
-        try (FSDirectory directory = FSDirectory.open(config.getIndexPath());
-             DirectoryReader reader = DirectoryReader.open(directory)) {
-
+        try (IndexReader reader = openCombinedReader()) {
+            if (reader == null) {
+                System.out.println("Нет доступных индексов для поиска.");
+                return;
+            }
             IndexSearcher searcher = new IndexSearcher(reader);
             QueryParser parser = createParser("content");
             Query query = parser.parse(keyword);
@@ -152,5 +162,25 @@ public class SearchService implements AutoCloseable {
                 ? QueryParser.Operator.AND
                 : QueryParser.Operator.OR);
         return parser;
+    }
+
+    private IndexReader openCombinedReader() throws Exception {
+        List<DirectoryReader> readers = new ArrayList<>();
+        for (Path path : indexPaths) {
+            FSDirectory directory = FSDirectory.open(path);
+            if (DirectoryReader.indexExists(directory)) {
+                readers.add(DirectoryReader.open(directory));
+            } else {
+                directory.close();
+            }
+        }
+
+        if (readers.isEmpty()) {
+            return null;
+        }
+        if (readers.size() == 1) {
+            return readers.get(0);
+        }
+        return new MultiReader(readers.toArray(new IndexReader[0]), true);
     }
 }

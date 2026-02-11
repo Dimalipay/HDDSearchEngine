@@ -35,8 +35,12 @@ public class IndexerService {
     );
 
     public IndexerService(SearchConfig config) {
+        this(config, config.getIndexPath());
+    }
+
+    public IndexerService(SearchConfig config, Path indexPath) {
         this.config = config;
-        this.indexPath = config.getIndexPath();
+        this.indexPath = indexPath;
         this.analyzer = AnalyzerProvider.getMultilingualAnalyzer();
     }
 
@@ -196,6 +200,25 @@ public class IndexerService {
             }
         }
         return true;
+    }
+
+
+    public long countDocuments() {
+        try (FSDirectory dir = FSDirectory.open(indexPath)) {
+            if (!DirectoryReader.indexExists(dir)) {
+                return 0;
+            }
+            try (DirectoryReader reader = DirectoryReader.open(dir)) {
+                return reader.numDocs();
+            }
+        } catch (IOException e) {
+            logger.warn("Не удалось получить количество документов в индексе {}: {}", indexPath, e.getMessage());
+            return 0;
+        }
+    }
+
+    public Path getIndexPath() {
+        return indexPath;
     }
 
     private boolean shouldSkip(String path) {
