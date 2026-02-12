@@ -6,7 +6,7 @@ plugins {
 }
 
 group = 'org.example'
-version = '1.0-SNAPSHOT'
+version = '1.0.0'
 
 repositories {
     mavenCentral()
@@ -54,11 +54,122 @@ dependencies {
     implementation 'org.slf4j:slf4j-api:2.0.7'
     implementation 'org.slf4j:slf4j-simple:2.0.7'
     implementation 'org.openjfx:javafx-web:17.0.9'
+    implementation 'com.github.albfernandez:juniversalchardet:2.4.0'
 
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.2'
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.9.2'
+    testImplementation 'org.apache.lucene:lucene-test-framework:9.9.1'
 }
 
 test {
     useJUnitPlatform()
+}
+
+def installerAppName = 'HDDSearchEngine'
+def installerMainClass = 'org.example.MainApp'
+def installerVersion = project.version.toString().replace('-SNAPSHOT', '')
+def installerType = (findProperty('installerType') ?: 'msi').toString()
+def isWindows = System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('win')
+
+tasks.register('fatJar', Jar) {
+    group = 'distribution'
+    description = 'Собирает self-contained JAR со всеми зависимостями для jpackage.'
+
+    archiveBaseName.set(installerAppName)
+    archiveVersion.set(installerVersion)
+    archiveClassifier.set('all')
+
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    manifest {
+        attributes 'Main-Class': installerMainClass
+    }
+
+    from(sourceSets.main.output)
+
+    dependsOn(configurations.runtimeClasspath)
+    from {
+        configurations.runtimeClasspath.get()
+                .findAll { it.exists() }
+                .collect { it.isDirectory() ? it : zipTree(it) }
+    }
+}
+
+tasks.register('prepareInstallerInput', Copy) {
+    group = 'distribution'
+    description = 'Подготавливает input-каталог для jpackage.'
+
+    dependsOn(tasks.named('fatJar'))
+    from(tasks.named('fatJar'))
+    into(layout.buildDirectory.dir('installer-input'))
+}
+
+tasks.register('jpackageInstaller', Exec) {
+    group = 'distribution'
+    description = 'Собирает Windows-инсталлятор (MSI/EXE) через jpackage. Выполняется только на Windows.'
+
+    dependsOn(tasks.named('prepareInstallerInput'))
+
+    def fatJarTask = tasks.named('fatJar', Jar)
+    def installerInputDir = layout.buildDirectory.dir('installer-input').get().asFile
+    def destDir = layout.buildDirectory.dir('dist').get().asFile
+
+    onlyIf {
+        if (!isWindows) {
+            logger.lifecycle('jpackageInstaller пропущен: сборка установщика поддерживается только на Windows.')
+            return false
+        }
+        return true
+    }
+
+    doFirst {
+        def fatJarName = fatJarTask.get().archiveFileName.get()
+
+        commandLine(
+                'jpackage',
+                '--type', installerType,
+                '--input', installerInputDir.absolutePath,
+                '--name', installerAppName,
+                '--main-jar', fatJarName,
+                '--main-class', installerMainClass,
+                '--win-shortcut',
+                '--win-menu',
+                '--win-dir-chooser',
+                '--win-per-user-install',
+                '--app-version', installerVersion,
+                '--dest', destDir.absolutePath
+        )
+
+        logger.lifecycle("Запуск jpackage: ${commandLine.join(' ')}")
+    }
+}
+
+tasks.register('verifyJpackageEnvironment') {
+    group = 'verification'
+    description = 'Проверяет наличие JDK 16+ и jpackage (а на Windows — напоминает про WiX для MSI).'
+
+    doLast {
+        def feature = JavaVersion.current().majorVersion.toInteger()
+        if (feature < 16) {
+            throw new GradleException("Требуется JDK 16+ для jpackage. Текущая версия: ${JavaVersion.current()}")
+        }
+
+        def output = new ByteArrayOutputStream()
+        exec {
+            commandLine 'jpackage', '--version'
+            standardOutput = output
+            errorOutput = output
+            ignoreExitValue = true
+        }
+
+        def text = output.toString().trim()
+        if (!text) {
+            throw new GradleException('jpackage не найден в PATH. Установите JDK 16+ и проверьте PATH.')
+        }
+
+        logger.lifecycle("jpackage доступен: ${text}")
+        if (isWindows && installerType == 'msi') {
+            logger.lifecycle('Для сборки MSI требуется WiX Toolset в PATH (стандартное требование jpackage).')
+        }
+    }
 }
