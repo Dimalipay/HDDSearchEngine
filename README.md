@@ -124,7 +124,11 @@ Apache Tika ограничивает длину извлекаемого тек�
 
 1. Установить JDK 17 (или 21), убедиться, что `jpackage` доступен в PATH.
 2. Для MSI установить **WiX Toolset** и добавить его в PATH.
-3. Проверить окружение:
+3. Убедиться, что JavaFX SDK 17.0.18 доступен по пути:
+
+`D:/HDDSearchEngine2/HDDSearchEngine_gemini/javafx-sdk-17.0.18/lib`
+
+4. Проверить окружение:
 
 ```bash
 ./gradlew verifyJpackageEnvironment
@@ -144,7 +148,14 @@ Apache Tika ограничивает длину извлекаемого тек�
 ./gradlew jpackageInstaller
 ```
 
-3. Собрать EXE вместо MSI:
+3. Сборка установщика без тестов (если нужно временно обойти падающие тесты):
+
+```bash
+./gradlew clean build -x test
+./gradlew jpackageInstaller
+```
+
+4. Собрать EXE вместо MSI:
 
 ```bash
 ./gradlew jpackageInstaller -PinstallerType=exe
@@ -164,6 +175,12 @@ Gradle-задача формирует вызов `jpackage` с параметр
 - `--win-per-user-install`
 - `--app-version <version>`
 - `--dest build/dist`
+- `--runtime-image build/javafx-runtime`
+
+Перед `jpackage` автоматически запускается `jlink` для создания минимального runtime:
+
+- `--module-path %JAVA_HOME%/jmods;D:/HDDSearchEngine2/HDDSearchEngine_gemini/javafx-sdk-17.0.18/lib`
+- `--add-modules java.base,java.desktop,java.logging,java.xml,javafx.controls,javafx.fxml,javafx.web`
 
 ### Артефакты
 
@@ -171,6 +188,10 @@ Gradle-задача формирует вызов `jpackage` с параметр
 
 - `build/dist/*.msi` или
 - `build/dist/*.exe`
+
+Сформированный runtime находится в:
+
+- `build/javafx-runtime/`
 
 ### Типовые ошибки
 

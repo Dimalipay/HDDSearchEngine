@@ -21,10 +21,12 @@ java {
 
 // Настройка JavaFX
 javafx {
-    version = "17.0.9"
+    version = "17.0.18"
     // Добавляем javafx.web в список модулей
     modules = [ 'javafx.controls', 'javafx.fxml', 'javafx.web' ]
 }
+
+def javafxSdkPath = "D:/HDDSearchEngine2/HDDSearchEngine_gemini/javafx-sdk-17.0.18/lib"
 
 // Принудительная кодировка UTF-8 для компиляции и запуска
 tasks.withType(JavaCompile) {
@@ -53,7 +55,9 @@ dependencies {
     implementation 'org.apache.logging.log4j:log4j-slf4j2-impl:2.20.0'
     implementation 'org.slf4j:slf4j-api:2.0.7'
     implementation 'org.slf4j:slf4j-simple:2.0.7'
-    implementation 'org.openjfx:javafx-web:17.0.9'
+    implementation 'org.openjfx:javafx-controls:17.0.18'
+    implementation 'org.openjfx:javafx-fxml:17.0.18'
+    implementation 'org.openjfx:javafx-web:17.0.18'
     implementation 'com.github.albfernandez:juniversalchardet:2.4.0'
 
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.2'
@@ -70,6 +74,7 @@ def installerMainClass = 'org.example.MainApp'
 def installerVersion = project.version.toString().replace('-SNAPSHOT', '')
 def installerType = (findProperty('installerType') ?: 'msi').toString()
 def isWindows = System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('win')
+def runtimeDir = layout.buildDirectory.dir('javafx-runtime').get().asFile
 
 tasks.register('fatJar', Jar) {
     group = 'distribution'
@@ -104,11 +109,44 @@ tasks.register('prepareInstallerInput', Copy) {
     into(layout.buildDirectory.dir('installer-input'))
 }
 
+tasks.register('createRuntimeImage', Exec) {
+    group = 'distribution'
+    description = 'Создает минимальный runtime (jlink) с JavaFX-модулями для jpackage.'
+
+    onlyIf {
+        if (!isWindows) {
+            logger.lifecycle('createRuntimeImage пропущен: runtime для Windows собирается только на Windows.')
+            return false
+        }
+        return true
+    }
+
+    doFirst {
+        if (runtimeDir.exists()) {
+            runtimeDir.deleteDir()
+        }
+
+        commandLine(
+                'jlink',
+                '--module-path', "${System.getenv('JAVA_HOME')}/jmods;${javafxSdkPath}",
+                '--add-modules', 'java.base,java.desktop,java.logging,java.xml,javafx.controls,javafx.fxml,javafx.web',
+                '--output', runtimeDir.absolutePath,
+                '--compress', '2',
+                '--strip-debug',
+                '--no-header-files',
+                '--no-man-pages'
+        )
+
+        logger.lifecycle("Запуск jlink: ${commandLine.join(' ')}")
+    }
+}
+
 tasks.register('jpackageInstaller', Exec) {
     group = 'distribution'
     description = 'Собирает Windows-инсталлятор (MSI/EXE) через jpackage. Выполняется только на Windows.'
 
     dependsOn(tasks.named('prepareInstallerInput'))
+    dependsOn(tasks.named('createRuntimeImage'))
 
     def fatJarTask = tasks.named('fatJar', Jar)
     def installerInputDir = layout.buildDirectory.dir('installer-input').get().asFile
@@ -137,7 +175,8 @@ tasks.register('jpackageInstaller', Exec) {
                 '--win-dir-chooser',
                 '--win-per-user-install',
                 '--app-version', installerVersion,
-                '--dest', destDir.absolutePath
+                '--dest', destDir.absolutePath,
+                '--runtime-image', runtimeDir.absolutePath
         )
 
         logger.lifecycle("Запуск jpackage: ${commandLine.join(' ')}")
@@ -152,6 +191,20 @@ tasks.register('verifyJpackageEnvironment') {
         def feature = JavaVersion.current().majorVersion.toInteger()
         if (feature < 16) {
             throw new GradleException("Требуется JDK 16+ для jpackage. Текущая версия: ${JavaVersion.current()}")
+        }
+
+        if (System.getenv('JAVA_HOME') == null || System.getenv('JAVA_HOME').isBlank()) {
+            throw new GradleException('JAVA_HOME не задан. Для jlink/jpackage нужен корректный JDK 17+ в JAVA_HOME.')
+        }
+
+        File jmodsDir = file("${System.getenv('JAVA_HOME')}/jmods")
+        if (!jmodsDir.exists()) {
+            throw new GradleException("Каталог jmods не найден: ${jmodsDir}. Проверьте JAVA_HOME.")
+        }
+
+        File javafxLib = file(javafxSdkPath)
+        if (!javafxLib.exists()) {
+            throw new GradleException("JavaFX SDK не найден по пути: ${javafxSdkPath}")
         }
 
         def output = new ByteArrayOutputStream()
@@ -172,4 +225,11 @@ tasks.register('verifyJpackageEnvironment') {
             logger.lifecycle('Для сборки MSI требуется WiX Toolset в PATH (стандартное требование jpackage).')
         }
     }
+}
+
+tasks.register('packageWindowsNoTests') {
+    group = 'distribution'
+    description = 'Собирает установщик Windows без выполнения тестов.'
+    dependsOn(tasks.named('clean'))
+    dependsOn(tasks.named('jpackageInstaller'))
 }
