@@ -1,6 +1,5 @@
 package org.example;
 
-import org.apache.lucene.document.Document;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.IndexSearcher;
@@ -82,6 +81,32 @@ class IndexingFlowTest {
 
         try (SearchService searchService = new SearchService(config)) {
             assertTrue(searchService.searchInFields("doc.txt", "filename").isEmpty());
+        }
+    }
+
+
+    @Test
+    void multilingualSearchFindsEnglishRussianAndMixedQueries() throws Exception {
+        Path dataDir = tempDir.resolve("data-multi");
+        Files.createDirectories(dataDir);
+
+        Path ruFile = dataDir.resolve("ru.txt");
+        Files.writeString(ruFile, "договор подписан сторонами");
+
+        Path enFile = dataDir.resolve("en.txt");
+        Files.writeString(enFile, "agreement signed by both parties");
+
+        Path mixFile = dataDir.resolve("mix.txt");
+        Files.writeString(mixFile, "договор agreement confirmed");
+
+        SearchConfig config = SearchConfig.forTesting(tempDir.resolve("index-multi"));
+        IndexerService indexer = new IndexerService(config);
+        indexer.runIncrementalIndexing(dataDir.toString());
+
+        try (SearchService searchService = new SearchService(config)) {
+            assertEquals(2, searchService.searchInFields("договор", "content").size());
+            assertEquals(2, searchService.searchInFields("agreement", "content").size());
+            assertEquals(1, searchService.searchInFields("договор agreement", "content").size());
         }
     }
 

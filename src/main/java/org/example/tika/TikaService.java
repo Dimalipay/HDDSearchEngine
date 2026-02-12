@@ -27,6 +27,9 @@ public class TikaService implements AutoCloseable {
 
     public String parseToString(Path path) throws Exception {
         Future<String> future = parserExecutor.submit(() -> {
+            if (isTextFile(path)) {
+                return TextFileReader.read(path, maxStringLength);
+            }
             Tika tika = new Tika();
             tika.setMaxStringLength(maxStringLength);
             String content = tika.parseToString(path);
@@ -48,5 +51,10 @@ public class TikaService implements AutoCloseable {
     @Override
     public void close() {
         parserExecutor.shutdownNow();
+    }
+
+    private boolean isTextFile(Path path) {
+        String name = path.getFileName().toString().toLowerCase();
+        return name.endsWith(".txt");
     }
 }

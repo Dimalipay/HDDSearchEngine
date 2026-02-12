@@ -34,7 +34,7 @@ class RussianAnalyzerBehaviorTest {
 
     @Test
     void morphologyAndCaseAreNormalized() throws Exception {
-        Analyzer analyzer = AnalyzerProvider.get();
+        Analyzer analyzer = AnalyzerProvider.getRussianAnalyzer();
         Path indexPath = tempDir.resolve("index");
         try (FSDirectory directory = FSDirectory.open(indexPath);
              IndexWriter writer = new IndexWriter(directory, new IndexWriterConfig(analyzer))) {
@@ -73,7 +73,7 @@ class RussianAnalyzerBehaviorTest {
     }
 
     private List<String> analyzeTokens(String text) throws IOException {
-        Analyzer analyzer = AnalyzerProvider.get();
+        Analyzer analyzer = AnalyzerProvider.getRussianAnalyzer();
         List<String> tokens = new ArrayList<>();
         try (TokenStream stream = analyzer.tokenStream("field", new StringReader(text))) {
             CharTermAttribute attr = stream.addAttribute(CharTermAttribute.class);
