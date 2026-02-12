@@ -1,120 +1,133 @@
 package org.example;
 
 import org.apache.lucene.analysis.Analyzer;
-import org.apache.lucene.analysis.TokenStream;
-import org.apache.lucene.analysis.LowerCaseFilter;
-import org.apache.lucene.analysis.ru.RussianAnalyzer;
-import org.apache.lucene.analysis.standard.StandardTokenizer;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.index.DirectoryReader;
-import org.apache.lucene.index.Term;
+import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.MultiReader;
+import org.apache.lucene.queryparser.classic.MultiFieldQueryParser;
 import org.apache.lucene.queryparser.classic.QueryParser;
 import org.apache.lucene.search.*;
-import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.search.highlight.*;
-import org.apache.tika.Tika;
+import org.apache.lucene.store.FSDirectory;
+import org.example.analysis.AnalyzerProvider;
+import org.example.config.SearchConfig;
+import org.example.tika.TikaService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
-import java.io.IOException;
-import java.nio.file.Paths;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
-public class SearchService {
-    private final String indexPath;
+public class SearchService implements AutoCloseable {
+    private static final Logger logger = LoggerFactory.getLogger(SearchService.class);
 
-    // ТОЧНО ТАКОЙ ЖЕ АНАЛИЗАТОР, КАК В INDEXER_SERVICE
-    // Это критически важно для того, чтобы поиск находил проиндексированные слова
-    private final Analyzer analyzer = new RussianAnalyzer();
+    private static final String[] CONTENT_FIELDS = {
+            AnalyzerProvider.FIELD_CONTENT_RU,
+            AnalyzerProvider.FIELD_CONTENT_EN,
+            "content"
+    };
 
-    public SearchService(String indexPath) {
-        this.indexPath = indexPath;
+    private static final String[] FILENAME_FIELDS = {
+            AnalyzerProvider.FIELD_FILENAME_RU,
+            AnalyzerProvider.FIELD_FILENAME_EN,
+            "filename"
+    };
+
+    private final SearchConfig config;
+    private final Analyzer analyzer;
+    private final TikaService tikaService;
+    private final List<Path> indexPaths;
+
+    public SearchService(SearchConfig config) {
+        this(config, List.of(config.getIndexPath()));
     }
 
-    /**
-     * Основной метод поиска для GUI (TableView)
-     */
+    public SearchService(SearchConfig config, List<Path> indexPaths) {
+        this.config = config;
+        this.indexPaths = indexPaths;
+        this.analyzer = AnalyzerProvider.getMultilingualAnalyzer();
+        this.tikaService = new TikaService(config.getTikaMaxStringLength(), config.getTikaTimeoutSeconds());
+    }
+
     public List<FileResult> searchInFields(String keyword, String field) throws Exception {
         List<FileResult> list = new ArrayList<>();
 
-        try (FSDirectory directory = FSDirectory.open(Paths.get(indexPath))) {
-            if (!DirectoryReader.indexExists(directory)) return list;
+        try (IndexReader reader = openCombinedReader()) {
+            if (reader == null) {
+                return list;
+            }
 
-            try (DirectoryReader reader = DirectoryReader.open(directory)) {
-                IndexSearcher searcher = new IndexSearcher(reader);
+            IndexSearcher searcher = new IndexSearcher(reader);
+            QueryParser parser = createParser(field);
+            Query query = parser.parse(keyword);
+            TopDocs hits = searcher.search(query, 100);
 
-                QueryParser parser = new QueryParser(field, analyzer);
-
-                // ПУНКТ 4: Настройка Slop (гибкость поиска фраз)
-                // Позволяет находить слова, даже если между ними есть 2-3 других слова
-                parser.setPhraseSlop(2);
-
-                // Настройка оператора по умолчанию (AND делает поиск точнее)
-                parser.setDefaultOperator(QueryParser.Operator.AND);
-
-                Query query = parser.parse(keyword);
-                TopDocs hits = searcher.search(query, 100);
-
-                for (ScoreDoc scoreDoc : hits.scoreDocs) {
-                    Document doc = searcher.storedFields().document(scoreDoc.doc);
-                    // Используем display_name для красивого отображения (с оригинальными _ и -)
-                    String nameToShow = doc.get("display_name") != null ? doc.get("display_name") : doc.get("filename");
-                    list.add(new FileResult(nameToShow, doc.get("path")));
-                }
+            for (ScoreDoc scoreDoc : hits.scoreDocs) {
+                Document doc = searcher.storedFields().document(scoreDoc.doc);
+                String nameToShow = doc.get("display_name") != null ? doc.get("display_name") : doc.get("filename");
+                list.add(new FileResult(nameToShow, doc.get("path")));
             }
         }
         return list;
     }
 
-    /**
-     * Генерация подсветки фрагментов текста для предпросмотра
-     */
     public String getHighlights(String filePath, String searchTerm) {
         try {
             File file = new File(filePath);
             if (!file.exists()) return "Файл не найден на диске.";
 
-            Tika tika = new Tika();
-            // Читаем только начало файла для быстроты (первые 100к символов)
-            String content = tika.parseToString(file);
-
-            // Настройка HTML-тегов для подсветки
+            String content = tikaService.parseToString(file.toPath());
             Formatter formatter = new SimpleHTMLFormatter("<B style='color:red;'>", "</B>");
 
-            QueryParser parser = new QueryParser("content", analyzer);
-            parser.setPhraseSlop(2);
-            Query query = parser.parse(searchTerm);
+            Query query = createParser("content").parse(searchTerm);
 
             QueryScorer scorer = new QueryScorer(query);
             Highlighter highlighter = new Highlighter(formatter, scorer);
 
-            // Разбиваем текст на фрагменты по 150 символов
             Fragmenter fragmenter = new SimpleSpanFragmenter(scorer, 150);
             highlighter.setTextFragmenter(fragmenter);
 
-            // Получаем 5 лучших фрагментов
-            String[] fragments = highlighter.getBestFragments(analyzer, "content", content, 5);
+            String[] ruFragments = highlighter.getBestFragments(AnalyzerProvider.getRussianAnalyzer(), "content", content, 5);
+            String[] enFragments = highlighter.getBestFragments(AnalyzerProvider.getEnglishAnalyzer(), "content", content, 5);
 
-            if (fragments == null || fragments.length == 0) {
+            List<String> merged = new ArrayList<>();
+            if (ruFragments != null) {
+                for (String fragment : ruFragments) {
+                    if (!fragment.isBlank() && !merged.contains(fragment)) {
+                        merged.add(fragment);
+                    }
+                }
+            }
+            if (enFragments != null) {
+                for (String fragment : enFragments) {
+                    if (!fragment.isBlank() && !merged.contains(fragment)) {
+                        merged.add(fragment);
+                    }
+                }
+            }
+
+            if (merged.isEmpty()) {
                 return "Совпадение найдено в названии файла или метаданных.";
             }
 
-            return String.join("<br>...<br>", fragments);
+            return String.join("<br>...<br>", merged);
         } catch (Exception e) {
+            logger.warn("Ошибка предпросмотра для {}: {}", filePath, e.getMessage());
             return "Ошибка предпросмотра: " + e.getMessage();
         }
     }
 
-    /**
-     * Консольный поиск (для отладки)
-     */
     public void searchAndPrint(String keyword) {
-        try (FSDirectory directory = FSDirectory.open(Paths.get(indexPath));
-             DirectoryReader reader = DirectoryReader.open(directory)) {
-
+        try (IndexReader reader = openCombinedReader()) {
+            if (reader == null) {
+                System.out.println("Нет доступных индексов для поиска.");
+                return;
+            }
             IndexSearcher searcher = new IndexSearcher(reader);
-            QueryParser parser = new QueryParser("content", analyzer);
-            parser.setPhraseSlop(2);
+            QueryParser parser = createParser("content");
             Query query = parser.parse(keyword);
 
             TopDocs hits = searcher.search(query, 10);
@@ -127,5 +140,47 @@ public class SearchService {
         } catch (Exception e) {
             System.err.println("Ошибка отладочного поиска: " + e.getMessage());
         }
+    }
+
+    @Override
+    public void close() {
+        tikaService.close();
+    }
+
+    private QueryParser createParser(String field) {
+        QueryParser parser;
+        if ("content".equals(field)) {
+            parser = new MultiFieldQueryParser(CONTENT_FIELDS, analyzer);
+        } else if ("filename".equals(field)) {
+            parser = new MultiFieldQueryParser(FILENAME_FIELDS, analyzer);
+        } else {
+            parser = new QueryParser(field, analyzer);
+        }
+
+        parser.setPhraseSlop(config.getPhraseSlop());
+        parser.setDefaultOperator(config.getDefaultOperator() == SearchConfig.DefaultOperator.AND
+                ? QueryParser.Operator.AND
+                : QueryParser.Operator.OR);
+        return parser;
+    }
+
+    private IndexReader openCombinedReader() throws Exception {
+        List<DirectoryReader> readers = new ArrayList<>();
+        for (Path path : indexPaths) {
+            FSDirectory directory = FSDirectory.open(path);
+            if (DirectoryReader.indexExists(directory)) {
+                readers.add(DirectoryReader.open(directory));
+            } else {
+                directory.close();
+            }
+        }
+
+        if (readers.isEmpty()) {
+            return null;
+        }
+        if (readers.size() == 1) {
+            return readers.get(0);
+        }
+        return new MultiReader(readers.toArray(new IndexReader[0]), true);
     }
 }
