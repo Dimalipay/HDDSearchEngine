@@ -114,3 +114,68 @@ Apache Tika ограничивает длину извлекаемого тек�
 
 Поиск выполняется сразу по всем готовым индексам через `MultiReader`,
 поэтому пользователь получает объединённый результат из нескольких дисков/директорий.
+
+
+## Сборка Windows-установщика (MSI/EXE)
+
+> Важно: `jpackage` не поддерживает кросс-компиляцию. Сборку Windows-инсталлятора нужно запускать **на Windows**.
+
+### Подготовка окружения
+
+1. Установить JDK 17 (или 21), убедиться, что `jpackage` доступен в PATH.
+2. Для MSI установить **WiX Toolset** и добавить его в PATH.
+3. Проверить окружение:
+
+```bash
+./gradlew verifyJpackageEnvironment
+```
+
+### Шаги сборки
+
+1. Собрать fat-jar со всеми зависимостями (Lucene, Tika, JavaFX):
+
+```bash
+./gradlew fatJar
+```
+
+2. Собрать установщик (по умолчанию `msi`):
+
+```bash
+./gradlew jpackageInstaller
+```
+
+3. Собрать EXE вместо MSI:
+
+```bash
+./gradlew jpackageInstaller -PinstallerType=exe
+```
+
+### Что делает `jpackageInstaller`
+
+Gradle-задача формирует вызов `jpackage` с параметрами:
+
+- `--input build/installer-input`
+- `--main-jar HDDSearchEngine-<version>-all.jar`
+- `--main-class org.example.MainApp`
+- `--type msi|exe`
+- `--win-shortcut`
+- `--win-menu`
+- `--win-dir-chooser`
+- `--win-per-user-install`
+- `--app-version <version>`
+- `--dest build/dist`
+
+### Артефакты
+
+Готовый установщик создаётся в каталоге:
+
+- `build/dist/*.msi` или
+- `build/dist/*.exe`
+
+### Типовые ошибки
+
+- `jpackage not found` — используется JDK без `jpackage` или PATH не настроен.
+- Ошибка MSI на Windows — чаще всего не установлен/не найден WiX Toolset.
+- Ошибки JavaFX при запуске — проверьте, что сборка идёт через `fatJar` и не пропущены runtime-зависимости.
+
+Логи сборки смотрите в выводе Gradle-команд (`--info` / `--stacktrace` для подробностей).
