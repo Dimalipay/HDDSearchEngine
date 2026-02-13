@@ -1,5 +1,9 @@
 package org.example;
 
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.pdmodel.font.PDType1Font;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.IndexSearcher;
@@ -135,12 +139,43 @@ class IndexingFlowTest {
         assertDoesNotThrow(() -> indexer.runIncrementalIndexing(dataDir.toString()));
     }
 
+    @Test
+    void indexesPdfAndFindsTermInContent() throws Exception {
+        Path dataDir = tempDir.resolve("data-pdf");
+        Files.createDirectories(dataDir);
+        Path pdf = dataDir.resolve("sample.pdf");
+        createSimplePdf(pdf, "agreement contract text");
+
+        SearchConfig config = SearchConfig.forTesting(tempDir.resolve("index-pdf"));
+        IndexerService indexer = new IndexerService(config);
+        indexer.runIncrementalIndexing(dataDir.toString());
+
+        try (SearchService searchService = new SearchService(config)) {
+            assertEquals(1, searchService.searchInFields("agreement", "content").size());
+        }
+    }
+
     private long countByPath(Path indexPath, String path) throws IOException {
         try (FSDirectory directory = FSDirectory.open(indexPath);
              DirectoryReader reader = DirectoryReader.open(directory)) {
             IndexSearcher searcher = new IndexSearcher(reader);
             TopDocs hits = searcher.search(new TermQuery(new Term("path", path)), 10);
             return hits.totalHits.value;
+        }
+    }
+
+    private void createSimplePdf(Path output, String text) throws IOException {
+        try (PDDocument document = new PDDocument()) {
+            PDPage page = new PDPage();
+            document.addPage(page);
+            try (PDPageContentStream contentStream = new PDPageContentStream(document, page)) {
+                contentStream.beginText();
+                contentStream.setFont(PDType1Font.HELVETICA, 12);
+                contentStream.newLineAtOffset(50, 700);
+                contentStream.showText(text);
+                contentStream.endText();
+            }
+            document.save(output.toFile());
         }
     }
 }

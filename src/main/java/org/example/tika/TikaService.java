@@ -36,6 +36,13 @@ public class TikaService implements AutoCloseable {
             if (content != null && content.length() >= maxStringLength) {
                 logger.info("Текст из {} был усечен до {} символов.", path, maxStringLength);
             }
+            if (isPdfFile(path)) {
+                int length = content == null ? 0 : content.length();
+                logger.info("PDF {} извлечен, количество символов: {}", path, length);
+                if (length == 0) {
+                    logger.warn("PDF {} распознан, но извлеченный текст пустой.", path);
+                }
+            }
             return content;
         });
 
@@ -56,5 +63,10 @@ public class TikaService implements AutoCloseable {
     private boolean isTextFile(Path path) {
         String name = path.getFileName().toString().toLowerCase();
         return name.endsWith(".txt");
+    }
+
+    private boolean isPdfFile(Path path) {
+        String name = path.getFileName().toString().toLowerCase();
+        return name.endsWith(".pdf");
     }
 }
