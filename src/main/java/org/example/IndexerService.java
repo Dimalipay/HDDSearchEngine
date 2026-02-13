@@ -153,11 +153,15 @@ public class IndexerService {
             Document doc = new Document();
             String originalName = path.getFileName().toString();
             String searchableName = originalName.replace("_", " ").replace("-", " ");
+            String filenameNoExt = stripExtension(originalName).replace("_", " ").replace("-", " ");
 
             doc.add(new StringField("path", path.toString(), Field.Store.YES));
             doc.add(new TextField("filename", searchableName, Field.Store.YES));
             doc.add(new TextField(AnalyzerProvider.FIELD_FILENAME_RU, searchableName, Field.Store.NO));
             doc.add(new TextField(AnalyzerProvider.FIELD_FILENAME_EN, searchableName, Field.Store.NO));
+            doc.add(new TextField("filename_no_ext", filenameNoExt, Field.Store.NO));
+            doc.add(new TextField(AnalyzerProvider.FIELD_FILENAME_NO_EXT_RU, filenameNoExt, Field.Store.NO));
+            doc.add(new TextField(AnalyzerProvider.FIELD_FILENAME_NO_EXT_EN, filenameNoExt, Field.Store.NO));
             doc.add(new StoredField("display_name", originalName));
             doc.add(new StoredField("modified", lastModified));
             doc.add(new NumericDocValuesField("modified", lastModified));
@@ -234,5 +238,13 @@ public class IndexerService {
                 || path.contains("~")
                 || lower.contains("$recycle.bin")
                 || lower.contains("system volume information");
+    }
+
+    private String stripExtension(String fileName) {
+        int dotIndex = fileName.lastIndexOf('.');
+        if (dotIndex <= 0) {
+            return fileName;
+        }
+        return fileName.substring(0, dotIndex);
     }
 }

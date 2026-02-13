@@ -33,6 +33,9 @@ public class SearchService implements AutoCloseable {
     private static final String[] FILENAME_FIELDS = {
             AnalyzerProvider.FIELD_FILENAME_RU,
             AnalyzerProvider.FIELD_FILENAME_EN,
+            AnalyzerProvider.FIELD_FILENAME_NO_EXT_RU,
+            AnalyzerProvider.FIELD_FILENAME_NO_EXT_EN,
+            "filename_no_ext",
             "filename"
     };
 

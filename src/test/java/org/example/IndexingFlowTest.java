@@ -160,6 +160,23 @@ class IndexingFlowTest {
         }
     }
 
+    @Test
+    void findsPdfByFilenameWithoutExtension() throws Exception {
+        Path dataDir = tempDir.resolve("data-filename");
+        Files.createDirectories(dataDir);
+        Path pdf = dataDir.resolve("Решение.pdf");
+        createSimplePdf(pdf, "legal text");
+
+        SearchConfig config = SearchConfig.forTesting(tempDir.resolve("index-filename"));
+        IndexerService indexer = new IndexerService(config);
+        indexer.runIncrementalIndexing(dataDir.toString());
+
+        try (SearchService searchService = new SearchService(config)) {
+            assertEquals(1, searchService.searchInFields("Решение", "filename").size());
+            assertEquals(1, searchService.searchInFields("решен", "filename").size());
+        }
+    }
+
     private long countByPath(Path indexPath, String path) throws IOException {
         try (FSDirectory directory = FSDirectory.open(indexPath);
              DirectoryReader reader = DirectoryReader.open(directory)) {

@@ -11,6 +11,8 @@ import java.util.Map;
 public final class AnalyzerProvider {
     public static final String FIELD_FILENAME_RU = "filename_ru";
     public static final String FIELD_FILENAME_EN = "filename_en";
+    public static final String FIELD_FILENAME_NO_EXT_RU = "filename_no_ext_ru";
+    public static final String FIELD_FILENAME_NO_EXT_EN = "filename_no_ext_en";
     public static final String FIELD_CONTENT_RU = "content_ru";
     public static final String FIELD_CONTENT_EN = "content_en";
 
@@ -37,6 +39,8 @@ public final class AnalyzerProvider {
         Map<String, Analyzer> fieldAnalyzers = new HashMap<>();
         fieldAnalyzers.put(FIELD_FILENAME_RU, RUSSIAN_ANALYZER);
         fieldAnalyzers.put(FIELD_FILENAME_EN, ENGLISH_ANALYZER);
+        fieldAnalyzers.put(FIELD_FILENAME_NO_EXT_RU, RUSSIAN_ANALYZER);
+        fieldAnalyzers.put(FIELD_FILENAME_NO_EXT_EN, ENGLISH_ANALYZER);
         fieldAnalyzers.put(FIELD_CONTENT_RU, RUSSIAN_ANALYZER);
         fieldAnalyzers.put(FIELD_CONTENT_EN, ENGLISH_ANALYZER);
         return new PerFieldAnalyzerWrapper(RUSSIAN_ANALYZER, fieldAnalyzers);
