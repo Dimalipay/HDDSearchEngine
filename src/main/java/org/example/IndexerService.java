@@ -1,21 +1,17 @@
 package org.example;
 
 import org.apache.lucene.analysis.Analyzer;
-import org.apache.lucene.analysis.LowerCaseFilter;
-import org.apache.lucene.analysis.ru.RussianAnalyzer;
-import org.apache.lucene.analysis.standard.StandardTokenizer;
-import org.apache.lucene.analysis.TokenStream;
-import org.apache.lucene.analysis.LowerCaseFilter;
-import org.apache.lucene.analysis.standard.StandardTokenizer;
 import org.apache.lucene.document.*;
 import org.apache.lucene.index.*;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.store.FSDirectory;
-import org.apache.tika.Tika;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.example.analysis.AnalyzerProvider;
+import org.example.config.SearchConfig;
+import org.example.tika.TikaService;
 
 import java.io.IOException;
 import java.nio.file.*;
@@ -29,9 +25,8 @@ public class IndexerService {
     private static final Logger logger = LoggerFactory.getLogger(IndexerService.class);
 
     private final Path indexPath;
-    private final Tika tika = new Tika();
-
-    private final Analyzer analyzer = new RussianAnalyzer();
+    private final Analyzer analyzer;
+    private final SearchConfig config;
 
     private static final Set<String> SKIP_EXTENSIONS = Set.of(
             "jpg", "jpeg", "png", "gif", "bmp", "tiff", "ico", "svg", "webp",
@@ -39,8 +34,14 @@ public class IndexerService {
             "zip", "rar", "7z", "iso", "exe", "dll", "sys", "tmp", "db"
     );
 
-    public IndexerService(String indexPath) {
-        this.indexPath = Paths.get(indexPath);
+    public IndexerService(SearchConfig config) {
+        this(config, config.getIndexPath());
+    }
+
+    public IndexerService(SearchConfig config, Path indexPath) {
+        this.config = config;
+        this.indexPath = indexPath;
+        this.analyzer = AnalyzerProvider.getMultilingualAnalyzer();
     }
 
     public void runIncrementalIndexing(String dataPath, BiConsumer<Integer, String> onProgress) throws IOException {
@@ -48,9 +49,9 @@ public class IndexerService {
             Files.createDirectories(indexPath);
         }
 
+        TikaService tikaService = new TikaService(config.getTikaMaxStringLength(), config.getTikaTimeoutSeconds());
         IndexWriterConfig config = new IndexWriterConfig(analyzer);
-        // УСКОРЕНИЕ: Используем большой буфер в RAM для быстрой обработки 2 млн файлов
-        config.setRAMBufferSizeMB(512);
+        config.setRAMBufferSizeMB(this.config.getRamBufferSizeMB());
         config.setOpenMode(IndexWriterConfig.OpenMode.CREATE_OR_APPEND);
 
         try (FSDirectory dir = FSDirectory.open(indexPath);
@@ -67,8 +68,7 @@ public class IndexerService {
                 AtomicInteger counter = new AtomicInteger(0);
 
                 // УСКОРЕНИЕ: Создаем пул потоков по количеству доступных ядер
-                int threads = Runtime.getRuntime().availableProcessors();
-                ExecutorService executor = Executors.newFixedThreadPool(threads);
+                ExecutorService executor = Executors.newFixedThreadPool(this.config.getIndexingThreads());
 
                 Files.walkFileTree(Paths.get(dataPath), new SimpleFileVisitor<>() {
                     @Override
@@ -76,7 +76,7 @@ public class IndexerService {
                         // Отправляем файл на обработку в свободный поток
                         executor.submit(() -> {
                             try {
-                                processFile(writer, searcher, file, attrs, counter, onProgress);
+                                processFile(writer, searcher, file, attrs, counter, onProgress, tikaService);
                             } catch (Exception e) {
                                 logger.error("Ошибка обработки: " + file, e);
                             }
@@ -103,6 +103,8 @@ public class IndexerService {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             logger.error("Индексация была прервана пользователем");
+        } finally {
+            tikaService.close();
         }
     }
 
@@ -124,7 +126,8 @@ public class IndexerService {
 
     private void processFile(IndexWriter writer, IndexSearcher searcher, Path file,
                              BasicFileAttributes attrs, AtomicInteger counter,
-                             BiConsumer<Integer, String> onProgress) throws Exception {
+                             BiConsumer<Integer, String> onProgress,
+                             TikaService tikaService) throws Exception {
 
         String pathString = file.toAbsolutePath().toString();
         if (shouldSkip(pathString)) return;
@@ -136,7 +139,7 @@ public class IndexerService {
             return;
         }
 
-        indexFile(writer, file, lastModified);
+        indexFile(writer, file, lastModified, tikaService);
 
         int currentCount = counter.incrementAndGet();
         // Чтобы GUI не зависал от миллионов обновлений, уведомляем раз в 100 файлов
@@ -145,7 +148,7 @@ public class IndexerService {
         }
     }
 
-    private void indexFile(IndexWriter writer, Path path, long lastModified) {
+    private void indexFile(IndexWriter writer, Path path, long lastModified, TikaService tikaService) {
         try {
             Document doc = new Document();
             String originalName = path.getFileName().toString();
@@ -153,13 +156,24 @@ public class IndexerService {
 
             doc.add(new StringField("path", path.toString(), Field.Store.YES));
             doc.add(new TextField("filename", searchableName, Field.Store.YES));
+            doc.add(new TextField(AnalyzerProvider.FIELD_FILENAME_RU, searchableName, Field.Store.NO));
+            doc.add(new TextField(AnalyzerProvider.FIELD_FILENAME_EN, searchableName, Field.Store.NO));
             doc.add(new StoredField("display_name", originalName));
             doc.add(new StoredField("modified", lastModified));
             doc.add(new NumericDocValuesField("modified", lastModified));
 
-            String content = tika.parseToString(path);
-            if (content != null && !content.isBlank()) {
-                doc.add(new TextField("content", content, Field.Store.NO));
+            try {
+                String content = tikaService.parseToString(path);
+                if (content != null && !content.isBlank()) {
+                    doc.add(new TextField("content", content, Field.Store.NO));
+                    doc.add(new TextField(AnalyzerProvider.FIELD_CONTENT_RU, content, Field.Store.NO));
+                    doc.add(new TextField(AnalyzerProvider.FIELD_CONTENT_EN, content, Field.Store.NO));
+                } else {
+                    logger.info("Файл {} проиндексирован без содержимого (пустой текст после парсинга).", path);
+                }
+            } catch (Exception parseException) {
+                logger.warn("Не удалось извлечь текст из {}. Файл будет добавлен в индекс по имени/пути. Причина: {}",
+                        path, parseException.getMessage());
             }
 
             writer.updateDocument(new Term("path", path.toString()), doc);
@@ -193,6 +207,25 @@ public class IndexerService {
             }
         }
         return true;
+    }
+
+
+    public long countDocuments() {
+        try (FSDirectory dir = FSDirectory.open(indexPath)) {
+            if (!DirectoryReader.indexExists(dir)) {
+                return 0;
+            }
+            try (DirectoryReader reader = DirectoryReader.open(dir)) {
+                return reader.numDocs();
+            }
+        } catch (IOException e) {
+            logger.warn("Не удалось получить количество документов в индексе {}: {}", indexPath, e.getMessage());
+            return 0;
+        }
+    }
+
+    public Path getIndexPath() {
+        return indexPath;
     }
 
     private boolean shouldSkip(String path) {
