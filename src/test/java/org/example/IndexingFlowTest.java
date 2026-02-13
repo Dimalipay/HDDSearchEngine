@@ -137,6 +137,11 @@ class IndexingFlowTest {
 
         IndexerService indexer = new IndexerService(config);
         assertDoesNotThrow(() -> indexer.runIncrementalIndexing(dataDir.toString()));
+
+        try (SearchService searchService = new SearchService(config)) {
+            assertEquals(1, searchService.searchInFields("broken", "filename").size(),
+                    "Даже при сбое парсинга PDF файл должен попадать в индекс по имени");
+        }
     }
 
     @Test

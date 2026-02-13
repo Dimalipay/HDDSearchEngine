@@ -162,11 +162,18 @@ public class IndexerService {
             doc.add(new StoredField("modified", lastModified));
             doc.add(new NumericDocValuesField("modified", lastModified));
 
-            String content = tikaService.parseToString(path);
-            if (content != null && !content.isBlank()) {
-                doc.add(new TextField("content", content, Field.Store.NO));
-                doc.add(new TextField(AnalyzerProvider.FIELD_CONTENT_RU, content, Field.Store.NO));
-                doc.add(new TextField(AnalyzerProvider.FIELD_CONTENT_EN, content, Field.Store.NO));
+            try {
+                String content = tikaService.parseToString(path);
+                if (content != null && !content.isBlank()) {
+                    doc.add(new TextField("content", content, Field.Store.NO));
+                    doc.add(new TextField(AnalyzerProvider.FIELD_CONTENT_RU, content, Field.Store.NO));
+                    doc.add(new TextField(AnalyzerProvider.FIELD_CONTENT_EN, content, Field.Store.NO));
+                } else {
+                    logger.info("Файл {} проиндексирован без содержимого (пустой текст после парсинга).", path);
+                }
+            } catch (Exception parseException) {
+                logger.warn("Не удалось извлечь текст из {}. Файл будет добавлен в индекс по имени/пути. Причина: {}",
+                        path, parseException.getMessage());
             }
 
             writer.updateDocument(new Term("path", path.toString()), doc);
