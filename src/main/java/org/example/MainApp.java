@@ -12,9 +12,12 @@ import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 import javafx.scene.web.WebView;
+import javafx.stage.Modality;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
+import org.example.photo.PhotoPdfResult;
+import org.example.photo.PhotoPdfService;
 import org.example.config.SearchConfig;
 import org.example.export.ConflictStrategy;
 import org.example.export.ExportResult;
@@ -29,6 +32,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -73,6 +77,7 @@ public class MainApp extends Application {
         Button btnIndex = new Button("Проиндексировать выбранный диск");
         Button btnReindex = new Button("Переиндексировать");
         Button btnExport = new Button("Экспорт найденных файлов");
+        Button btnPhotoPdf = new Button("📷 Фото → PDF");
 
         ProgressBar pb = new ProgressBar(0);
         pb.setPrefWidth(220);
@@ -117,6 +122,7 @@ public class MainApp extends Application {
 
         btnSearch.setOnAction(e -> performSearch(searchField.getText()));
         btnExport.setOnAction(e -> exportResults(primaryStage, statusLabel, pb, btnExport));
+        btnPhotoPdf.setOnAction(e -> createPdfFromPhotos(primaryStage));
 
         setupSelectionListener(nameTable, searchField, previewArea);
         setupSelectionListener(contentTable, searchField, previewArea);
@@ -124,7 +130,7 @@ public class MainApp extends Application {
         VBox leftPane = new VBox(10,
                 new HBox(10, new Label("Диск/папка:"), disksCombo, btnChooseDirectory),
                 new HBox(10, new Label("Выбрано:"), hddLabel),
-                new HBox(10, btnIndex, btnReindex, btnExport, pb),
+                new HBox(10, btnIndex, btnReindex, btnExport, btnPhotoPdf, pb),
                 indexStatusLabel,
                 indexSizeLabel,
                 statusLabel,
@@ -321,6 +327,93 @@ public class MainApp extends Application {
                     showAlert("Экспорт завершен", statusLabel.getText());
                 });
             });
+        }
+    }
+
+    private void createPdfFromPhotos(Stage owner) {
+        DirectoryChooser folderChooser = new DirectoryChooser();
+        folderChooser.setTitle("Выберите папку с фотографиями");
+        File folder = folderChooser.showDialog(owner);
+        if (folder == null) {
+            return;
+        }
+
+        FileChooser saveChooser = new FileChooser();
+        saveChooser.setTitle("Сохранить PDF из фото");
+        saveChooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("PDF", "*.pdf"));
+        saveChooser.setInitialFileName(folder.getName() + "_photos.pdf");
+        File outputPdf = saveChooser.showSaveDialog(owner);
+        if (outputPdf == null) {
+            return;
+        }
+
+        Stage progressStage = new Stage();
+        progressStage.initOwner(owner);
+        progressStage.initModality(Modality.APPLICATION_MODAL);
+        progressStage.setTitle("Фото → PDF");
+
+        Label status = new Label("Подготовка...");
+        ProgressBar progressBar = new ProgressBar(0);
+        progressBar.setPrefWidth(320);
+        Button cancel = new Button("Отмена");
+
+        VBox box = new VBox(10, status, progressBar, cancel);
+        box.setPadding(new Insets(12));
+        progressStage.setScene(new Scene(box));
+
+        AtomicBoolean cancelled = new AtomicBoolean(false);
+        cancel.setOnAction(e -> cancelled.set(true));
+
+        PhotoPdfService service = new PhotoPdfService();
+        backgroundExecutor.execute(() -> {
+            try {
+                PhotoPdfResult result = service.generatePdfFromFolder(folder.toPath(), outputPdf.toPath(),
+                        (text, current, total) -> Platform.runLater(() -> {
+                            status.setText(text + " " + current + "/" + total);
+                            progressBar.setProgress(total == 0 ? 0 : (double) current / total);
+                        }),
+                        cancelled::get
+                );
+
+                Platform.runLater(() -> {
+                    progressStage.close();
+                    showPhotoPdfResultDialog(result);
+                });
+            } catch (Exception ex) {
+                Platform.runLater(() -> {
+                    progressStage.close();
+                    showAlert("Ошибка", "Не удалось создать PDF: " + ex.getMessage());
+                });
+            }
+        });
+
+        progressStage.show();
+    }
+
+    private void showPhotoPdfResultDialog(PhotoPdfResult result) {
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+        alert.setTitle("PDF создан");
+        alert.setHeaderText("Создан PDF: " + result.outputFile());
+        alert.setContentText("Страниц: " + result.pageCount() + "\nИзображений: " + result.imageCount());
+
+        ButtonType openFile = new ButtonType("Открыть файл");
+        ButtonType openFolder = new ButtonType("Открыть папку");
+        ButtonType close = new ButtonType("Закрыть", ButtonBar.ButtonData.CANCEL_CLOSE);
+        alert.getButtonTypes().setAll(openFile, openFolder, close);
+
+        Optional<ButtonType> answer = alert.showAndWait();
+        if (answer.isEmpty()) {
+            return;
+        }
+
+        try {
+            if (answer.get() == openFile) {
+                Desktop.getDesktop().open(result.outputFile().toFile());
+            } else if (answer.get() == openFolder && result.outputFile().getParent() != null) {
+                Desktop.getDesktop().open(result.outputFile().getParent().toFile());
+            }
+        } catch (Exception e) {
+            showAlert("Ошибка", "Не удалось открыть результат: " + e.getMessage());
         }
     }
 
