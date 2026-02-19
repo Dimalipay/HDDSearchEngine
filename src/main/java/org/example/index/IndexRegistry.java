@@ -86,6 +86,18 @@ public class IndexRegistry {
         save(entries);
     }
 
+    /** Удаляет запись об индексе из реестра по пути источника. */
+    public synchronized void remove(String sourcePath) {
+        List<IndexEntry> entries = load();
+        boolean removed = entries.removeIf(it -> it.path().equals(sourcePath));
+        if (removed) {
+            save(entries);
+            logger.info("Запись индекса для {} удалена из реестра.", sourcePath);
+        } else {
+            logger.warn("Запись индекса для {} не найдена в реестре.", sourcePath);
+        }
+    }
+
     public synchronized Optional<IndexEntry> findBySource(String sourcePath) {
         return load().stream().filter(it -> it.path().equals(sourcePath)).findFirst();
     }

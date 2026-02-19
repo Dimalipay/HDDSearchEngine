@@ -20,6 +20,7 @@ import java.util.Set;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
+import java.util.function.BooleanSupplier;
 
 public class IndexerService {
     private static final Logger logger = LoggerFactory.getLogger(IndexerService.class);
@@ -44,22 +45,34 @@ public class IndexerService {
         this.analyzer = AnalyzerProvider.getMultilingualAnalyzer();
     }
 
-    public void runIncrementalIndexing(String dataPath, BiConsumer<Integer, String> onProgress) throws IOException {
+    // ── Совместимость: без отмены ────────────────────────────────────────────
+    public void runIncrementalIndexing(String dataPath) throws IOException {
+        runIncrementalIndexing(dataPath, null, () -> false);
+    }
+
+    public void runIncrementalIndexing(String dataPath,
+                                       BiConsumer<Integer, String> onProgress) throws IOException {
+        runIncrementalIndexing(dataPath, onProgress, () -> false);
+    }
+
+    // ── Основной метод с поддержкой отмены ──────────────────────────────────
+    public void runIncrementalIndexing(String dataPath,
+                                       BiConsumer<Integer, String> onProgress,
+                                       BooleanSupplier cancellation) throws IOException {
         if (!Files.exists(indexPath)) {
             Files.createDirectories(indexPath);
         }
 
         TikaService tikaService = new TikaService(config.getTikaMaxStringLength(), config.getTikaTimeoutSeconds());
-        IndexWriterConfig config = new IndexWriterConfig(analyzer);
-        config.setRAMBufferSizeMB(this.config.getRamBufferSizeMB());
-        config.setOpenMode(IndexWriterConfig.OpenMode.CREATE_OR_APPEND);
+        IndexWriterConfig writerConfig = new IndexWriterConfig(analyzer);
+        writerConfig.setRAMBufferSizeMB(this.config.getRamBufferSizeMB());
+        writerConfig.setOpenMode(IndexWriterConfig.OpenMode.CREATE_OR_APPEND);
 
         try (FSDirectory dir = FSDirectory.open(indexPath);
-             IndexWriter writer = new IndexWriter(dir, config)) {
+             IndexWriter writer = new IndexWriter(dir, writerConfig)) {
 
             try (DirectoryReader reader = getReader(dir, writer)) {
 
-                // ПУНКТ 3: Удаляем из индекса файлы, которые физически удалены с диска
                 if (reader != null) {
                     cleanDeletedFiles(writer, reader);
                 }
@@ -67,14 +80,18 @@ public class IndexerService {
                 IndexSearcher searcher = (reader != null) ? new IndexSearcher(reader) : null;
                 AtomicInteger counter = new AtomicInteger(0);
 
-                // УСКОРЕНИЕ: Создаем пул потоков по количеству доступных ядер
                 ExecutorService executor = Executors.newFixedThreadPool(this.config.getIndexingThreads());
 
                 Files.walkFileTree(Paths.get(dataPath), new SimpleFileVisitor<>() {
                     @Override
                     public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                        // Отправляем файл на обработку в свободный поток
+                        // Проверяем флаг отмены при каждом новом файле
+                        if (cancellation.getAsBoolean()) {
+                            executor.shutdownNow();
+                            return FileVisitResult.TERMINATE;
+                        }
                         executor.submit(() -> {
+                            if (cancellation.getAsBoolean()) return;
                             try {
                                 processFile(writer, searcher, file, attrs, counter, onProgress, tikaService);
                             } catch (Exception e) {
@@ -90,19 +107,24 @@ public class IndexerService {
                     }
                 });
 
-                // Ждем завершения всех потоков (может занять время на 450 ГБ)
                 executor.shutdown();
                 executor.awaitTermination(7, TimeUnit.DAYS);
             }
 
-            // Финальный коммит и оптимизация индекса (ForceMerge)
-            writer.commit();
-            if (writer.hasDeletions()) {
-                writer.forceMerge(1); // Полезно для очень больших индексов
+            // Если не было отмены — коммитим и оптимизируем
+            if (!cancellation.getAsBoolean()) {
+                writer.commit();
+                if (writer.hasDeletions()) {
+                    writer.forceMerge(1);
+                }
+            } else {
+                logger.info("Индексация {} отменена пользователем.", dataPath);
+                throw new CancellationException("Индексация остановлена пользователем");
             }
+
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            logger.error("Индексация была прервана пользователем");
+            logger.error("Индексация была прервана");
         } finally {
             tikaService.close();
         }
@@ -134,7 +156,6 @@ public class IndexerService {
 
         long lastModified = attrs.lastModifiedTime().toMillis();
 
-        // Проверяем: изменился ли файл или он уже есть в индексе?
         if (searcher != null && !isModified(searcher, pathString, lastModified)) {
             return;
         }
@@ -142,7 +163,6 @@ public class IndexerService {
         indexFile(writer, file, lastModified, tikaService);
 
         int currentCount = counter.incrementAndGet();
-        // Чтобы GUI не зависал от миллионов обновлений, уведомляем раз в 100 файлов
         if (onProgress != null && currentCount % 100 == 0) {
             onProgress.accept(currentCount, file.getFileName().toString());
         }
@@ -173,22 +193,16 @@ public class IndexerService {
                     doc.add(new TextField(AnalyzerProvider.FIELD_CONTENT_RU, content, Field.Store.NO));
                     doc.add(new TextField(AnalyzerProvider.FIELD_CONTENT_EN, content, Field.Store.NO));
                 } else {
-                    logger.info("Файл {} проиндексирован без содержимого (пустой текст после парсинга).", path);
+                    logger.info("Файл {} проиндексирован без содержимого.", path);
                 }
             } catch (Exception parseException) {
-                logger.warn("Не удалось извлечь текст из {}. Файл будет добавлен в индекс по имени/пути. Причина: {}",
-                        path, parseException.getMessage());
+                logger.warn("Не удалось извлечь текст из {}. Причина: {}", path, parseException.getMessage());
             }
 
             writer.updateDocument(new Term("path", path.toString()), doc);
         } catch (Exception e) {
-            logger.warn("Файл пропущен (Tika не смогла прочитать): {}", path);
+            logger.warn("Файл пропущен: {}", path);
         }
-    }
-
-    // Совместимость со старым вызовом
-    public void runIncrementalIndexing(String dataPath) throws IOException {
-        runIncrementalIndexing(dataPath, null);
     }
 
     private DirectoryReader getReader(FSDirectory dir, IndexWriter writer) {
@@ -213,7 +227,6 @@ public class IndexerService {
         return true;
     }
 
-
     public long countDocuments() {
         try (FSDirectory dir = FSDirectory.open(indexPath)) {
             if (!DirectoryReader.indexExists(dir)) {
@@ -223,7 +236,7 @@ public class IndexerService {
                 return reader.numDocs();
             }
         } catch (IOException e) {
-            logger.warn("Не удалось получить количество документов в индексе {}: {}", indexPath, e.getMessage());
+            logger.warn("Не удалось получить количество документов: {}", e.getMessage());
             return 0;
         }
     }
@@ -242,9 +255,7 @@ public class IndexerService {
 
     private String stripExtension(String fileName) {
         int dotIndex = fileName.lastIndexOf('.');
-        if (dotIndex <= 0) {
-            return fileName;
-        }
+        if (dotIndex <= 0) return fileName;
         return fileName.substring(0, dotIndex);
     }
 }
