@@ -54,6 +54,8 @@ public class MainApp extends Application {
 
     /** Флаг отмены текущей индексации. Устанавливается в true кнопкой «Стоп». */
     private final AtomicBoolean indexingCancelled = new AtomicBoolean(false);
+    /** Гарантирует, что одновременно выполняется только одна сессия индексации. */
+    private final AtomicBoolean indexingInProgress = new AtomicBoolean(false);
 
     // ─── Fluent Design colour tokens ────────────────────────────────────────
     private static final String C_BG          = "#1c1c1e";
@@ -367,6 +369,10 @@ public class MainApp extends Application {
             showAlert("Внимание", "Сначала выберите диск или директорию");
             return;
         }
+        if (!indexingInProgress.compareAndSet(false, true)) {
+            showAlert("Индексация", "Индексация уже выполняется. Дождитесь завершения или нажмите «Стоп».");
+            return;
+        }
 
         String indexDirName = IndexRegistry.buildIndexDirectoryName(sourcePath);
         Path targetIndex = config.getIndexPath().resolve(indexDirName);
@@ -441,6 +447,8 @@ public class MainApp extends Application {
                     refreshIndexInfo(indexSizeLabel, indexStatusLabel, sourcePath);
                     showAlert("Ошибка", ex.getMessage());
                 });
+            } finally {
+                indexingInProgress.set(false);
             }
         });
     }
