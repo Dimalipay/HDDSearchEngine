@@ -63,12 +63,12 @@ public class IndexerService {
             Files.createDirectories(indexPath);
         }
 
-        TikaService tikaService = new TikaService(config.getTikaMaxStringLength(), config.getTikaTimeoutSeconds());
         IndexWriterConfig writerConfig = new IndexWriterConfig(analyzer);
         writerConfig.setRAMBufferSizeMB(this.config.getRamBufferSizeMB());
         writerConfig.setOpenMode(IndexWriterConfig.OpenMode.CREATE_OR_APPEND);
 
-        try (FSDirectory dir = FSDirectory.open(indexPath);
+        try (TikaService tikaService = new TikaService(config.getTikaMaxStringLength(), config.getTikaTimeoutSeconds());
+             FSDirectory dir = FSDirectory.open(indexPath);
              IndexWriter writer = new IndexWriter(dir, writerConfig)) {
 
             try (DirectoryReader reader = getReader(dir, writer)) {
@@ -90,14 +90,19 @@ public class IndexerService {
                             executor.shutdownNow();
                             return FileVisitResult.TERMINATE;
                         }
-                        executor.submit(() -> {
-                            if (cancellation.getAsBoolean()) return;
-                            try {
-                                processFile(writer, searcher, file, attrs, counter, onProgress, tikaService);
-                            } catch (Exception e) {
-                                logger.error("Ошибка обработки: " + file, e);
-                            }
-                        });
+                        try {
+                            executor.submit(() -> {
+                                if (cancellation.getAsBoolean()) return;
+                                try {
+                                    processFile(writer, searcher, file, attrs, counter, onProgress, tikaService);
+                                } catch (Exception e) {
+                                    logger.error("Ошибка обработки: " + file, e);
+                                }
+                            });
+                        } catch (RejectedExecutionException rejected) {
+                            logger.debug("Обработка файла {} пропущена: пул завершает работу.", file);
+                            return FileVisitResult.TERMINATE;
+                        }
                         return FileVisitResult.CONTINUE;
                     }
 
@@ -108,7 +113,7 @@ public class IndexerService {
                 });
 
                 executor.shutdown();
-                executor.awaitTermination(7, TimeUnit.DAYS);
+                awaitExecutorTermination(executor);
             }
 
             // Если не было отмены — коммитим и оптимизируем
@@ -125,8 +130,15 @@ public class IndexerService {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             logger.error("Индексация была прервана");
-        } finally {
-            tikaService.close();
+        }
+    }
+
+    private void awaitExecutorTermination(ExecutorService executor) throws InterruptedException {
+        if (!executor.awaitTermination(7, TimeUnit.DAYS)) {
+            executor.shutdownNow();
+            if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("Потоки индексации не завершились корректно.");
+            }
         }
     }
 
