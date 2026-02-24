@@ -1,7 +1,6 @@
 plugins {
     id 'java'
     id 'application'
-    // Плагин для JavaFX: автоматически управляет платформозависимыми библиотеками
     id 'org.openjfx.javafxplugin' version '0.0.13'
 }
 
@@ -12,17 +11,14 @@ repositories {
     mavenCentral()
 }
 
-// Настройка Java 17
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(17)
     }
 }
 
-// Настройка JavaFX
 javafx {
     version = "17.0.18"
-    // Добавляем javafx.web в список модулей
     modules = [ 'javafx.controls', 'javafx.fxml', 'javafx.web' ]
 }
 
@@ -39,37 +35,54 @@ application {
 }
 
 dependencies {
-    // --- Apache Lucene 9.9.1 (Поиск и индексация) ---
+    // --- Apache Lucene 9.9.1 ---
     implementation 'org.apache.lucene:lucene-core:9.9.1'
     implementation 'org.apache.lucene:lucene-analysis-common:9.9.1'
     implementation 'org.apache.lucene:lucene-queryparser:9.9.1'
     implementation 'org.apache.lucene:lucene-highlighter:9.9.1'
 
-    // --- Apache Tika (Парсинг документов: Excel, Word, PDF) ---
+    // --- Apache Tika (БЕЗ exclude — пусть сам тянет нужный PDFBox) ---
     implementation 'org.apache.tika:tika-core:2.9.1'
-    implementation('org.apache.tika:tika-parsers-standard-package:2.9.1') {
-        exclude group: 'org.apache.pdfbox'
-    }
-    implementation 'org.apache.pdfbox:pdfbox:2.0.30'
-    implementation 'org.apache.pdfbox:fontbox:2.0.30'
-    implementation 'org.apache.pdfbox:xmpbox:2.0.30'
+    implementation 'org.apache.tika:tika-parsers-standard-package:2.9.1'
+
+    // --- PDFBox — единая версия 2.0.31, без дублей ---
+    implementation 'org.apache.pdfbox:pdfbox:2.0.31'
+    implementation 'org.apache.pdfbox:pdfbox-tools:2.0.31'
+    implementation 'org.apache.pdfbox:fontbox:2.0.31'
+    implementation 'org.apache.pdfbox:xmpbox:2.0.31'
+    implementation 'org.apache.pdfbox:jempbox:1.8.17'
+
+    // --- Metadata extractor (EXIF для фото) ---
     implementation 'com.drewnoakes:metadata-extractor:2.19.0'
 
-    // --- Логирование (устраняет ошибки SLF4J и Log4j2 в консоли) ---
-    implementation 'org.apache.logging.log4j:log4j-core:2.25.3'
+    // --- Логирование (только log4j2, slf4j-simple УБРАН — конфликт биндингов) ---
     implementation 'org.apache.logging.log4j:log4j-api:2.20.0'
+    implementation 'org.apache.logging.log4j:log4j-core:2.20.0'
     implementation 'org.apache.logging.log4j:log4j-slf4j2-impl:2.20.0'
     implementation 'org.slf4j:slf4j-api:2.0.7'
-    implementation 'org.slf4j:slf4j-simple:2.0.7'
+
+    // --- JavaFX ---
     implementation 'org.openjfx:javafx-controls:17.0.18'
     implementation 'org.openjfx:javafx-fxml:17.0.18'
     implementation 'org.openjfx:javafx-web:17.0.18'
+
+    // --- Определение кодировки ---
     implementation 'com.github.albfernandez:juniversalchardet:2.4.0'
 
+    // --- Тесты ---
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.2'
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.9.2'
     testImplementation 'org.apache.lucene:lucene-test-framework:9.9.1'
-    testImplementation 'org.apache.pdfbox:pdfbox:2.0.30'
+    testImplementation 'org.apache.pdfbox:pdfbox:2.0.31'
+}
+
+// Принудительно разрешаем конфликты версий PDFBox в пользу 2.0.31
+configurations.all {
+    resolutionStrategy {
+        force 'org.apache.pdfbox:pdfbox:2.0.31'
+        force 'org.apache.pdfbox:fontbox:2.0.31'
+        force 'org.apache.pdfbox:xmpbox:2.0.31'
+    }
 }
 
 test {

@@ -19,7 +19,8 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Set;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BiConsumer;
+import java.util.concurrent.atomic.AtomicLong;
+
 import java.util.function.BooleanSupplier;
 
 public class IndexerService {
@@ -29,80 +30,112 @@ public class IndexerService {
     private final Analyzer analyzer;
     private final SearchConfig config;
 
-    private static final Set<String> SKIP_EXTENSIONS = Set.of(
-            "jpg", "jpeg", "png", "gif", "bmp", "tiff", "ico", "svg", "webp",
-            "mp4", "mkv", "avi", "mov", "mp3", "wav", "flac",
-            "zip", "rar", "7z", "iso", "exe", "dll", "sys", "tmp", "db"
+    /**
+     * Расширения, которые пропускаются всегда — медиафайлы, архивы, системный мусор.
+     * Изображения (jpg/png/tiff...) сюда НЕ включены: в OCR-режиме они индексируются.
+     */
+    private static final Set<String> SKIP_ALWAYS = Set.of(
+            "mp4", "mkv", "avi", "mov", "mp3", "wav", "flac", "aac", "ogg",
+            "zip", "rar", "7z", "iso", "exe", "dll", "sys", "tmp", "db",
+            "ico", "svg", "webp"   // векторная/веб-графика — Tesseract не поддерживает
     );
 
+    /** Растровые изображения пропускаются только когда OCR отключён. */
+    private static final Set<String> SKIP_IMAGES_WITHOUT_OCR = Set.of(
+            "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif"
+    );
+
+    // ── OCR флаг ─────────────────────────────────────────────────────────────
+    private final boolean ocrEnabled;
+
+    // ── Callback с поддержкой прогресса ─────────────────────────────────────
+    /**
+     * current  — сколько файлов обработано
+     * total    — сколько файлов всего (из предварительного подсчёта)
+     * fileName — имя текущего файла
+     */
+    @FunctionalInterface
+    public interface ProgressCallback {
+        void onProgress(int current, int total, String fileName);
+    }
+
     public IndexerService(SearchConfig config) {
-        this(config, config.getIndexPath());
+        this(config, config.getIndexPath(), false);
     }
 
     public IndexerService(SearchConfig config, Path indexPath) {
-        this.config = config;
-        this.indexPath = indexPath;
-        this.analyzer = AnalyzerProvider.getMultilingualAnalyzer();
+        this(config, indexPath, false);
     }
 
-    // ── Совместимость: без отмены ────────────────────────────────────────────
+    /** @param ocrEnabled включить OCR через Tesseract для изображений и скан-PDF */
+    public IndexerService(SearchConfig config, Path indexPath, boolean ocrEnabled) {
+        this.config     = config;
+        this.indexPath  = indexPath;
+        this.ocrEnabled = ocrEnabled;
+        this.analyzer   = AnalyzerProvider.getMultilingualAnalyzer();
+    }
+
+    // ── Совместимость: старые сигнатуры ─────────────────────────────────────
     public void runIncrementalIndexing(String dataPath) throws IOException {
-        runIncrementalIndexing(dataPath, null, () -> false);
+        runIncrementalIndexing(dataPath, (ProgressCallback) null, () -> false);
     }
 
+    // ── Основной метод ───────────────────────────────────────────────────────
     public void runIncrementalIndexing(String dataPath,
-                                       BiConsumer<Integer, String> onProgress) throws IOException {
-        runIncrementalIndexing(dataPath, onProgress, () -> false);
-    }
-
-    // ── Основной метод с поддержкой отмены ──────────────────────────────────
-    public void runIncrementalIndexing(String dataPath,
-                                       BiConsumer<Integer, String> onProgress,
+                                       ProgressCallback onProgress,
                                        BooleanSupplier cancellation) throws IOException {
         if (!Files.exists(indexPath)) {
             Files.createDirectories(indexPath);
         }
 
+        // ── Шаг 1: быстрый предварительный подсчёт файлов ───────────────────
+        int totalFiles = countIndexableFiles(dataPath, cancellation);
+        logger.info("Предварительный подсчёт: {} файлов для индексации в {}", totalFiles, dataPath);
+
+        if (cancellation.getAsBoolean()) {
+            throw new CancellationException("Индексация остановлена пользователем");
+        }
+
+        // ── Шаг 2: основная индексация ───────────────────────────────────────
+        TikaService tikaService = new TikaService(
+                config.getTikaMaxStringLength(),
+                config.getTikaTimeoutSeconds(),
+                ocrEnabled,
+                config.getOcrLanguage());
         IndexWriterConfig writerConfig = new IndexWriterConfig(analyzer);
         writerConfig.setRAMBufferSizeMB(this.config.getRamBufferSizeMB());
         writerConfig.setOpenMode(IndexWriterConfig.OpenMode.CREATE_OR_APPEND);
 
-        try (TikaService tikaService = new TikaService(config.getTikaMaxStringLength(), config.getTikaTimeoutSeconds());
-             FSDirectory dir = FSDirectory.open(indexPath);
+        try (FSDirectory dir = FSDirectory.open(indexPath);
              IndexWriter writer = new IndexWriter(dir, writerConfig)) {
 
             try (DirectoryReader reader = getReader(dir, writer)) {
-
                 if (reader != null) {
                     cleanDeletedFiles(writer, reader);
                 }
 
                 IndexSearcher searcher = (reader != null) ? new IndexSearcher(reader) : null;
                 AtomicInteger counter = new AtomicInteger(0);
+                int finalTotal = totalFiles;
 
                 ExecutorService executor = Executors.newFixedThreadPool(this.config.getIndexingThreads());
 
                 Files.walkFileTree(Paths.get(dataPath), new SimpleFileVisitor<>() {
                     @Override
                     public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                        // Проверяем флаг отмены при каждом новом файле
                         if (cancellation.getAsBoolean()) {
                             executor.shutdownNow();
                             return FileVisitResult.TERMINATE;
                         }
-                        try {
-                            executor.submit(() -> {
-                                if (cancellation.getAsBoolean()) return;
-                                try {
-                                    processFile(writer, searcher, file, attrs, counter, onProgress, tikaService);
-                                } catch (Exception e) {
-                                    logger.error("Ошибка обработки: " + file, e);
-                                }
-                            });
-                        } catch (RejectedExecutionException rejected) {
-                            logger.debug("Обработка файла {} пропущена: пул завершает работу.", file);
-                            return FileVisitResult.TERMINATE;
-                        }
+                        executor.submit(() -> {
+                            if (cancellation.getAsBoolean()) return;
+                            try {
+                                processFile(writer, searcher, file, attrs,
+                                        counter, finalTotal, onProgress, tikaService);
+                            } catch (Exception e) {
+                                logger.error("Ошибка обработки: " + file, e);
+                            }
+                        });
                         return FileVisitResult.CONTINUE;
                     }
 
@@ -113,10 +146,9 @@ public class IndexerService {
                 });
 
                 executor.shutdown();
-                awaitExecutorTermination(executor);
+                executor.awaitTermination(7, TimeUnit.DAYS);
             }
 
-            // Если не было отмены — коммитим и оптимизируем
             if (!cancellation.getAsBoolean()) {
                 writer.commit();
                 if (writer.hasDeletions()) {
@@ -130,16 +162,37 @@ public class IndexerService {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             logger.error("Индексация была прервана");
+        } finally {
+            tikaService.close();
         }
     }
 
-    private void awaitExecutorTermination(ExecutorService executor) throws InterruptedException {
-        if (!executor.awaitTermination(7, TimeUnit.DAYS)) {
-            executor.shutdownNow();
-            if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
-                throw new IllegalStateException("Потоки индексации не завершились корректно.");
-            }
+    /**
+     * Быстрый проход по дереву для подсчёта файлов, которые будут проиндексированы.
+     * Применяет ту же логику shouldSkip, что и основная индексация.
+     */
+    private int countIndexableFiles(String dataPath, BooleanSupplier cancellation) {
+        AtomicInteger count = new AtomicInteger(0);
+        try {
+            Files.walkFileTree(Paths.get(dataPath), new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    if (cancellation.getAsBoolean()) return FileVisitResult.TERMINATE;
+                    if (!shouldSkip(file.toAbsolutePath().toString())) {
+                        count.incrementAndGet();
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        } catch (IOException e) {
+            logger.warn("Ошибка при подсчёте файлов: {}", e.getMessage());
         }
+        return count.get();
     }
 
     private void cleanDeletedFiles(IndexWriter writer, DirectoryReader reader) throws IOException {
@@ -158,9 +211,13 @@ public class IndexerService {
         }
     }
 
-    private void processFile(IndexWriter writer, IndexSearcher searcher, Path file,
-                             BasicFileAttributes attrs, AtomicInteger counter,
-                             BiConsumer<Integer, String> onProgress,
+    private void processFile(IndexWriter writer,
+                             IndexSearcher searcher,
+                             Path file,
+                             BasicFileAttributes attrs,
+                             AtomicInteger counter,
+                             int total,
+                             ProgressCallback onProgress,
                              TikaService tikaService) throws Exception {
 
         String pathString = file.toAbsolutePath().toString();
@@ -176,7 +233,7 @@ public class IndexerService {
 
         int currentCount = counter.incrementAndGet();
         if (onProgress != null && currentCount % 100 == 0) {
-            onProgress.accept(currentCount, file.getFileName().toString());
+            onProgress.onProgress(currentCount, total, file.getFileName().toString());
         }
     }
 
@@ -204,11 +261,18 @@ public class IndexerService {
                     doc.add(new TextField("content", content, Field.Store.NO));
                     doc.add(new TextField(AnalyzerProvider.FIELD_CONTENT_RU, content, Field.Store.NO));
                     doc.add(new TextField(AnalyzerProvider.FIELD_CONTENT_EN, content, Field.Store.NO));
+                    if (ocrEnabled) {
+                        logger.debug("Текст извлечён (OCR): {} символов из {}", content.length(), path.getFileName());
+                    }
                 } else {
-                    logger.info("Файл {} проиндексирован без содержимого.", path);
+                    // Пустой контент — для скан-PDF это означает что OCR не дал результата
+                    if (ocrEnabled) {
+                        logger.warn("OCR не извлёк текст из {}. Убедитесь что языковые пакеты rus/eng установлены.", path.getFileName());
+                    }
                 }
             } catch (Exception parseException) {
-                logger.warn("Не удалось извлечь текст из {}. Причина: {}", path, parseException.getMessage());
+                logger.warn("Не удалось извлечь текст из {} (OCR={}). Причина: {}",
+                        path.getFileName(), ocrEnabled, parseException.getMessage());
             }
 
             writer.updateDocument(new Term("path", path.toString()), doc);
@@ -241,9 +305,7 @@ public class IndexerService {
 
     public long countDocuments() {
         try (FSDirectory dir = FSDirectory.open(indexPath)) {
-            if (!DirectoryReader.indexExists(dir)) {
-                return 0;
-            }
+            if (!DirectoryReader.indexExists(dir)) return 0;
             try (DirectoryReader reader = DirectoryReader.open(dir)) {
                 return reader.numDocs();
             }
@@ -257,12 +319,16 @@ public class IndexerService {
         return indexPath;
     }
 
-    private boolean shouldSkip(String path) {
+    boolean shouldSkip(String path) {
         String lower = path.toLowerCase();
-        return SKIP_EXTENSIONS.stream().anyMatch(lower::endsWith)
-                || path.contains("~")
-                || lower.contains("$recycle.bin")
-                || lower.contains("system volume information");
+        // Системный мусор и неподдерживаемые форматы — всегда пропускаем
+        if (SKIP_ALWAYS.stream().anyMatch(lower::endsWith)) return true;
+        if (path.contains("~"))                              return true;
+        if (lower.contains("$recycle.bin"))                  return true;
+        if (lower.contains("system volume information"))      return true;
+        // Изображения пропускаем только если OCR отключён
+        if (!ocrEnabled && SKIP_IMAGES_WITHOUT_OCR.stream().anyMatch(lower::endsWith)) return true;
+        return false;
     }
 
     private String stripExtension(String fileName) {

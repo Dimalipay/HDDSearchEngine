@@ -34,6 +34,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
+import java.time.Instant;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ExecutorService;
@@ -54,8 +55,9 @@ public class MainApp extends Application {
 
     /** Флаг отмены текущей индексации. Устанавливается в true кнопкой «Стоп». */
     private final AtomicBoolean indexingCancelled = new AtomicBoolean(false);
-    /** Гарантирует, что одновременно выполняется только одна сессия индексации. */
-    private final AtomicBoolean indexingInProgress = new AtomicBoolean(false);
+
+    /** Флаг OCR — включает распознавание текста на изображениях и скан-PDF. */
+    private final AtomicBoolean ocrEnabled = new AtomicBoolean(false);
 
     // ─── Fluent Design colour tokens ────────────────────────────────────────
     private static final String C_BG          = "#1c1c1e";
@@ -119,6 +121,41 @@ public class MainApp extends Application {
 
         // Кнопка «Стоп» доступна только во время индексации
         btnStop.setDisable(true);
+
+        // ── OCR ──────────────────────────────────────────────────────────────
+        CheckBox chkOcr = new CheckBox("OCR (Tesseract)");
+        chkOcr.setStyle("-fx-text-fill:" + C_TEXT_SEC + ";-fx-font-size:12px;-fx-font-family:'Segoe UI';");
+        chkOcr.setTooltip(new Tooltip(
+                "Включает распознавание текста на изображениях (JPG, PNG, TIFF)\n" +
+                        "и отсканированных PDF без текстового слоя.\n" +
+                        "Требует установленного Tesseract OCR."));
+
+        // Метка статуса Tesseract — проверяется один раз при старте в фоне
+        Label lblTesseract = metaLabel("Tesseract: проверка...");
+        backgroundExecutor.execute(() -> {
+            boolean available = org.example.tika.TikaService.isTesseractAvailable();
+            Platform.runLater(() -> {
+                if (available) {
+                    lblTesseract.setText("Tesseract: ✓ найден  ·  OCR включён");
+                    lblTesseract.setStyle("-fx-text-fill:#4caf50;-fx-font-size:11px;-fx-font-family:'Segoe UI';");
+                    chkOcr.setDisable(false);
+                    // Автоматически включаем OCR — пользователю ничего делать не нужно
+                    chkOcr.setSelected(true);
+                    ocrEnabled.set(true);
+                } else {
+                    lblTesseract.setText("Tesseract: не установлен  ·  OCR недоступен");
+                    lblTesseract.setStyle("-fx-text-fill:" + C_TEXT_TER + ";-fx-font-size:11px;-fx-font-family:'Segoe UI';");
+                    chkOcr.setDisable(true);
+                    chkOcr.setTooltip(new Tooltip(
+                            "Tesseract не найден в PATH.\n" +
+                                    "Установите: https://github.com/tesseract-ocr/tesseract\n" +
+                                    "Языки RU+EN: скачайте rus.traineddata и eng.traineddata\n" +
+                                    "в папку tessdata."));
+                }
+            });
+        });
+
+        chkOcr.setOnAction(e -> ocrEnabled.set(chkOcr.isSelected()));
 
         // ── Progress bar ─────────────────────────────────────────────────────
         ProgressBar pb = new ProgressBar(0);
@@ -221,6 +258,9 @@ public class MainApp extends Application {
         // Деструктивные и вспомогательные действия
         VBox secondaryActions = new VBox(6, btnDeleteIndex, btnExport, btnPhotoPdf);
 
+        // OCR-блок
+        VBox ocrBlock = new VBox(5, chkOcr, lblTesseract);
+
         VBox sidebar = new VBox(12,
                 sectionHeader("💾  ИСТОЧНИК"),
                 diskRow,
@@ -233,6 +273,9 @@ public class MainApp extends Application {
                 sectionHeader("⚙️  ДЕЙСТВИЯ"),
                 primaryActions,
                 stopAction,
+                divider(),
+                sectionHeader("🔍  OCR"),
+                ocrBlock,
                 divider(),
                 secondaryActions,
                 pb,
@@ -369,10 +412,6 @@ public class MainApp extends Application {
             showAlert("Внимание", "Сначала выберите диск или директорию");
             return;
         }
-        if (!indexingInProgress.compareAndSet(false, true)) {
-            showAlert("Индексация", "Индексация уже выполняется. Дождитесь завершения или нажмите «Стоп».");
-            return;
-        }
 
         String indexDirName = IndexRegistry.buildIndexDirectoryName(sourcePath);
         Path targetIndex = config.getIndexPath().resolve(indexDirName);
@@ -389,12 +428,12 @@ public class MainApp extends Application {
 
         boolean finalReindex = reindex;
 
-        // Сбрасываем флаг и меняем состояние кнопок
         indexingCancelled.set(false);
         btnIndex.setDisable(true);
         btnReindex.setDisable(true);
         btnStop.setDisable(false);
         pb.setProgress(-1);
+        statusLabel.setText("Подсчёт файлов...");
         indexRegistry.upsert(IndexRegistry.failedEntry(sourcePath, targetIndex));
 
         backgroundExecutor.execute(() -> {
@@ -403,36 +442,56 @@ public class MainApp extends Application {
                     deleteDirectory(targetIndex);
                 }
 
-                IndexerService indexer = new IndexerService(config, targetIndex);
+                // Фиксируем время старта для расчёта ETA
+                final long startMs = System.currentTimeMillis();
+
+                IndexerService indexer = new IndexerService(config, targetIndex, ocrEnabled.get());
                 indexer.runIncrementalIndexing(
                         sourcePath,
-                        (count, fileName) -> Platform.runLater(() ->
-                                statusLabel.setText(String.format("Индексация %s: %,d | %s", sourcePath, count, fileName))),
-                        indexingCancelled::get   // передаём флаг отмены
+                        (current, total, fileName) -> Platform.runLater(() -> {
+                            // ── Прогресс-бар ────────────────────────────────
+                            if (total > 0) {
+                                pb.setProgress((double) current / total);
+                            }
+
+                            // ── ETA ─────────────────────────────────────────
+                            String etaStr = formatEta(startMs, current, total);
+                            String progressPct = total > 0
+                                    ? String.format(" (%d%%)", (int)(100.0 * current / total))
+                                    : "";
+
+                            statusLabel.setText(String.format(
+                                    "%,d / %,d файлов%s · %s · %s",
+                                    current, total, progressPct, etaStr, fileName
+                            ));
+                        }),
+                        indexingCancelled::get
                 );
 
                 long docs = indexer.countDocuments();
                 long size = directorySize(targetIndex);
                 indexRegistry.upsert(IndexRegistry.readyEntry(sourcePath, targetIndex, docs, size));
 
+                long totalSec = (System.currentTimeMillis() - startMs) / 1000;
+                boolean usedOcr = ocrEnabled.get();
                 Platform.runLater(() -> {
                     pb.setProgress(1);
                     btnIndex.setDisable(false);
                     btnReindex.setDisable(false);
                     btnStop.setDisable(true);
-                    statusLabel.setText("Индексация завершена: " + sourcePath);
+                    String ocrTag = usedOcr ? "  ·  OCR ✓" : "";
+                    statusLabel.setText("✅ Готово за " + formatDuration(totalSec) + ocrTag + " · " + sourcePath);
                     refreshIndexInfo(indexSizeLabel, indexStatusLabel, sourcePath);
                 });
 
             } catch (CancellationException cancelled) {
-                // Пользователь нажал «Стоп» — сохраняем частичный индекс как FAILED
                 indexRegistry.upsert(IndexRegistry.failedEntry(sourcePath, targetIndex));
                 Platform.runLater(() -> {
                     pb.setProgress(0);
                     btnIndex.setDisable(false);
                     btnReindex.setDisable(false);
                     btnStop.setDisable(true);
-                    statusLabel.setText("Индексация остановлена: " + sourcePath);
+                    statusLabel.setText("⏹ Индексация остановлена: " + sourcePath);
                     refreshIndexInfo(indexSizeLabel, indexStatusLabel, sourcePath);
                 });
 
@@ -447,10 +506,38 @@ public class MainApp extends Application {
                     refreshIndexInfo(indexSizeLabel, indexStatusLabel, sourcePath);
                     showAlert("Ошибка", ex.getMessage());
                 });
-            } finally {
-                indexingInProgress.set(false);
             }
         });
+    }
+
+    /**
+     * Рассчитывает и форматирует оставшееся время.
+     * Алгоритм: (elapsed / current) * (total - current)
+     */
+    private String formatEta(long startMs, int current, int total) {
+        if (current <= 0 || total <= 0) return "считаем...";
+
+        long elapsedMs = System.currentTimeMillis() - startMs;
+        if (elapsedMs < 1000) return "считаем...";
+
+        long remaining = total - current;
+        if (remaining <= 0) return "завершается...";
+
+        long etaMs = (long)((double) elapsedMs / current * remaining);
+        long etaSec = etaMs / 1000;
+
+        return "~" + formatDuration(etaSec) + " осталось";
+    }
+
+    /** Форматирует секунды в "Xч Yмин Zсек" / "Yмин Zсек" / "Zсек" */
+    private String formatDuration(long totalSeconds) {
+        long h = totalSeconds / 3600;
+        long m = (totalSeconds % 3600) / 60;
+        long s = totalSeconds % 60;
+
+        if (h > 0) return String.format("%dч %02dмин", h, m);
+        if (m > 0) return String.format("%dмин %02dсек", m, s);
+        return String.format("%dсек", s);
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -840,6 +927,22 @@ public class MainApp extends Application {
 
             /* Кнопка «Остановить» в задизабленном состоянии */
             .button:disabled { -fx-opacity: 0.35; }
+
+            /* ─── CheckBox (OCR toggle) ─────────────────── */
+            .check-box .box {
+                -fx-background-color: #3d3d3d;
+                -fx-border-color: #666;
+                -fx-border-width: 1;
+                -fx-border-radius: 3;
+                -fx-background-radius: 3;
+            }
+            .check-box:selected .box {
+                -fx-background-color: #0078d4;
+                -fx-border-color: #0078d4;
+            }
+            .check-box .mark { -fx-background-color: white; }
+            .check-box:disabled { -fx-opacity: 0.4; }
+            .check-box .text  { -fx-fill: #cccccc; }
 
             .tooltip { -fx-background-color: #3a3a3a; -fx-text-fill: #cccccc; -fx-border-color: #555; -fx-border-width: 1; -fx-background-radius: 4; -fx-font-size: 11px; }
             .dialog-pane { -fx-background-color: #2d2d2d; }
