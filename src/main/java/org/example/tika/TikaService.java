@@ -14,6 +14,7 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.*;
+import org.xml.sax.SAXException;
 
 public class TikaService implements AutoCloseable {
     private static final Logger logger = LoggerFactory.getLogger(TikaService.class);
@@ -118,12 +119,32 @@ public class TikaService implements AutoCloseable {
         BodyContentHandler handler = new BodyContentHandler(maxStringLength > 0 ? maxStringLength : -1);
 
         try (InputStream stream = Files.newInputStream(path)) {
-            parser.parse(stream, handler, metadata, context);
+            try {
+                parser.parse(stream, handler, metadata, context);
+            } catch (SAXException sax) {
+                if (isWriteLimitReached(sax)) {
+                    logger.warn("OCR {} превысил лимит {} символов. Текст усечён.",
+                            path.getFileName(), maxStringLength);
+                } else {
+                    throw sax;
+                }
+            }
         }
 
         String result = handler.toString();
         logger.info("OCR {} -> {} символов (язык: {}).", path.getFileName(), result.length(), ocrLanguage);
         return result;
+    }
+
+    private boolean isWriteLimitReached(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            if (current.getClass().getSimpleName().contains("WriteLimitReachedException")) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private boolean isTextFile(Path p) {
