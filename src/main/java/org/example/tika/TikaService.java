@@ -22,8 +22,6 @@ import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
-import org.apache.tika.sax.ContentHandlerFactory;
-import org.xml.sax.ContentHandler;
 import org.xml.sax.SAXException;
 
 public class TikaService implements AutoCloseable {
@@ -279,8 +277,6 @@ public class TikaService implements AutoCloseable {
         return result;
     }
 
-    // ── Утилиты ───────────────────────────────────────────────────────────────
-
     private boolean isWriteLimitReached(Throwable throwable) {
         Throwable current = throwable;
         while (current != null) {
@@ -290,12 +286,6 @@ public class TikaService implements AutoCloseable {
             current = current.getCause();
         }
         return false;
-    }
-
-    private String getExtension(Path p) {
-        String name = p.getFileName().toString().toLowerCase();
-        int dot = name.lastIndexOf('.');
-        return dot >= 0 ? name.substring(dot + 1) : "";
     }
 
     private boolean isTextFile(Path p) {

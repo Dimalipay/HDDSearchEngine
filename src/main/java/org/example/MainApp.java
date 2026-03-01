@@ -14,6 +14,11 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import javafx.scene.web.WebView;
+import javafx.scene.input.Clipboard;
+import javafx.scene.input.ClipboardContent;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyCodeCombination;
+import javafx.scene.input.KeyCombination;
 import javafx.stage.Modality;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
@@ -37,6 +42,7 @@ import java.util.*;
 import java.time.Instant;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -58,6 +64,9 @@ public class MainApp extends Application {
 
     /** Флаг OCR — включает распознавание текста на изображениях и скан-PDF. */
     private final AtomicBoolean ocrEnabled = new AtomicBoolean(false);
+
+    /** Ссылка на активный индексатор для корректной остановки по Esc/кнопке. */
+    private final AtomicReference<IndexerService> activeIndexer = new AtomicReference<>();
 
     // ─── Fluent Design colour tokens ────────────────────────────────────────
     private static final String C_BG          = "#1c1c1e";
@@ -214,11 +223,7 @@ public class MainApp extends Application {
                 runIndexing(true, hddPath, btnIndex, btnReindex, btnStop, pb, statusLabel, indexSizeLabel, indexStatusLabel));
 
         // ── «Остановить» — устанавливает флаг отмены ────────────────────────
-        btnStop.setOnAction(e -> {
-            indexingCancelled.set(true);
-            btnStop.setDisable(true);
-            statusLabel.setText("Остановка индексации...");
-        });
+        btnStop.setOnAction(e -> requestStopIndexing(btnStop, statusLabel));
 
         // ── «Удалить индекс» — диалог выбора и удаления ─────────────────────
         btnDeleteIndex.setOnAction(e -> deleteIndexDialog(primaryStage, indexSizeLabel, indexStatusLabel, statusLabel));
@@ -336,6 +341,7 @@ public class MainApp extends Application {
         root.setStyle("-fx-background-color:" + C_BG + ";");
 
         Scene scene = new Scene(root, 1280, 820);
+        configureAccelerators(scene, searchField, btnSearch, btnReindex, btnStop, statusLabel, nameTable, contentTable);
         applyGlobalStyles(scene);
         primaryStage.setScene(scene);
         primaryStage.show();
@@ -456,6 +462,7 @@ public class MainApp extends Application {
                 final long startMs = System.currentTimeMillis();
 
                 IndexerService indexer = new IndexerService(config, targetIndex, ocrEnabled.get());
+                activeIndexer.set(indexer);
                 indexer.runIncrementalIndexing(
                         sourcePath,
                         (current, total, fileName) -> Platform.runLater(() -> {
@@ -516,6 +523,8 @@ public class MainApp extends Application {
                     refreshIndexInfo(indexSizeLabel, indexStatusLabel, sourcePath);
                     showAlert("Ошибка", ex.getMessage());
                 });
+            } finally {
+                activeIndexer.set(null);
             }
         });
     }
@@ -1007,6 +1016,56 @@ public class MainApp extends Application {
 
         table.setRowFactory(tv -> {
             TableRow<FileResult> row = new TableRow<>();
+
+            MenuItem openItem = new MenuItem("Открыть");
+            MenuItem openFolderItem = new MenuItem("Открыть папку с файлом");
+            MenuItem copyPathItem = new MenuItem("Копировать путь");
+            MenuItem copyNameItem = new MenuItem("Копировать имя файла");
+            ContextMenu contextMenu = new ContextMenu(openItem, openFolderItem, new SeparatorMenuItem(), copyPathItem, copyNameItem);
+
+            openItem.setOnAction(e -> {
+                FileResult item = row.getItem();
+                if (item != null) {
+                    openFile(item.getPath());
+                }
+            });
+            openFolderItem.setOnAction(e -> {
+                FileResult item = row.getItem();
+                if (item != null) {
+                    openFileLocation(item.getPath());
+                }
+            });
+            copyPathItem.setOnAction(e -> {
+                FileResult item = row.getItem();
+                if (item != null) {
+                    copyToClipboard(item.getPath());
+                }
+            });
+            copyNameItem.setOnAction(e -> {
+                FileResult item = row.getItem();
+                if (item != null) {
+                    copyToClipboard(new File(item.getPath()).getName());
+                }
+            });
+
+            row.itemProperty().addListener((obs, oldItem, newItem) -> {
+                boolean hasItem = newItem != null;
+                boolean exists = hasItem && Files.exists(Path.of(newItem.getPath()));
+                openItem.setDisable(!exists);
+                openFolderItem.setDisable(!exists);
+                copyPathItem.setDisable(!hasItem);
+                copyNameItem.setDisable(!hasItem);
+            });
+
+            row.emptyProperty().addListener((obs, wasEmpty, isNowEmpty) ->
+                    row.setContextMenu(isNowEmpty ? null : contextMenu));
+
+            row.setOnContextMenuRequested(event -> {
+                if (!row.isSelected()) {
+                    event.consume();
+                }
+            });
+
             row.setOnMouseClicked(event -> {
                 if (event.getClickCount() == 2 && (!row.isEmpty())) {
                     openFile(row.getItem().getPath());
@@ -1016,6 +1075,65 @@ public class MainApp extends Application {
         });
 
         return table;
+    }
+
+    private void configureAccelerators(Scene scene,
+                                       TextField searchField,
+                                       Button btnSearch,
+                                       Button btnReindex,
+                                       Button btnStop,
+                                       Label statusLabel,
+                                       TableView<FileResult> nameTable,
+                                       TableView<FileResult> contentTable) {
+        scene.getAccelerators().put(
+                new KeyCodeCombination(KeyCode.F, KeyCombination.CONTROL_DOWN),
+                searchField::requestFocus
+        );
+        scene.getAccelerators().put(
+                new KeyCodeCombination(KeyCode.ENTER),
+                btnSearch::fire
+        );
+        scene.getAccelerators().put(
+                new KeyCodeCombination(KeyCode.F5),
+                btnReindex::fire
+        );
+        scene.getAccelerators().put(
+                new KeyCodeCombination(KeyCode.C, KeyCombination.CONTROL_DOWN),
+                () -> {
+                    FileResult selected = getSelectedResult(nameTable, contentTable);
+                    if (selected != null) {
+                        copyToClipboard(selected.getPath());
+                    }
+                }
+        );
+        scene.getAccelerators().put(
+                new KeyCodeCombination(KeyCode.ESCAPE),
+                () -> requestStopIndexing(btnStop, statusLabel)
+        );
+    }
+
+    private FileResult getSelectedResult(TableView<FileResult> nameTable, TableView<FileResult> contentTable) {
+        if (contentTable.isFocused() && contentTable.getSelectionModel().getSelectedItem() != null) {
+            return contentTable.getSelectionModel().getSelectedItem();
+        }
+        if (nameTable.isFocused() && nameTable.getSelectionModel().getSelectedItem() != null) {
+            return nameTable.getSelectionModel().getSelectedItem();
+        }
+        FileResult contentSelected = contentTable.getSelectionModel().getSelectedItem();
+        if (contentSelected != null) {
+            return contentSelected;
+        }
+        return nameTable.getSelectionModel().getSelectedItem();
+    }
+
+    private void requestStopIndexing(Button btnStop, Label statusLabel) {
+        indexingCancelled.set(true);
+        IndexerService indexer = activeIndexer.get();
+        if (indexer != null) {
+            indexer.stop();
+        }
+        btnStop.setDisable(true);
+        statusLabel.setText("Остановка индексации...");
     }
 
     private void setupSelectionListener(TableView<FileResult> table, TextField searchField, WebView preview) {
@@ -1049,9 +1167,39 @@ public class MainApp extends Application {
     private void openFile(String path) {
         try {
             Desktop.getDesktop().open(new File(path));
-        } catch (IOException e) {
+        } catch (Exception e) {
             showAlert("Ошибка", "Не удалось открыть файл: " + e.getMessage());
         }
+    }
+
+    private void openFileLocation(String path) {
+        File file = new File(path);
+        if (!file.exists()) {
+            showAlert("Ошибка", "Файл не найден: " + path);
+            return;
+        }
+
+        try {
+            if (System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("win")) {
+                Runtime.getRuntime().exec("explorer.exe /select," + file.getAbsolutePath());
+                return;
+            }
+            File parent = file.getParentFile();
+            if (parent != null && parent.exists()) {
+                Desktop.getDesktop().open(parent);
+            }
+        } catch (Exception e) {
+            showAlert("Ошибка", "Не удалось открыть папку файла: " + e.getMessage());
+        }
+    }
+
+    private void copyToClipboard(String value) {
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        ClipboardContent content = new ClipboardContent();
+        content.putString(value);
+        Clipboard.getSystemClipboard().setContent(content);
     }
 
     private long directorySize(Path path) {
