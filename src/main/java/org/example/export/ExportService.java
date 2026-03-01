@@ -3,11 +3,19 @@ package org.example.export;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import jakarta.mail.BodyPart;
+import jakarta.mail.Multipart;
+import jakarta.mail.Part;
+import jakarta.mail.Session;
+import jakarta.mail.internet.MimeMessage;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.*;
 import java.util.ArrayList;
+import java.util.Locale;
+import java.util.Properties;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -61,6 +69,7 @@ public class ExportService {
                 }
 
                 Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+                extractMailAttachmentsIfAny(source, destination, targetDirectory);
                 exported++;
             } catch (Exception e) {
                 failed++;
@@ -121,6 +130,71 @@ public class ExportService {
         }
 
         return new ExportResult(total, exported, 0, failed);
+    }
+
+    private void extractMailAttachmentsIfAny(Path source,
+                                             Path exportedMailPath,
+                                             Path exportRoot) {
+        if (!isEmlFile(source)) {
+            return;
+        }
+
+        Path attachmentsDir = exportRoot.resolve("вложения");
+        try {
+            Files.createDirectories(attachmentsDir);
+            Session session = Session.getDefaultInstance(new Properties());
+            try (InputStream in = Files.newInputStream(exportedMailPath)) {
+                MimeMessage message = new MimeMessage(session, in);
+                Object content = message.getContent();
+                extractAttachmentsFromContent(content, attachmentsDir);
+            }
+        } catch (Exception e) {
+            logger.warn("Ошибка извлечения вложений из {}: {}", source, e.getMessage());
+        }
+    }
+
+    private void extractAttachmentsFromContent(Object content,
+                                               Path attachmentsDir) throws Exception {
+        if (!(content instanceof Multipart multipart)) {
+            return;
+        }
+
+        for (int i = 0; i < multipart.getCount(); i++) {
+            BodyPart part = multipart.getBodyPart(i);
+            String disposition = part.getDisposition();
+            String fileName = part.getFileName();
+            boolean isAttachment = Part.ATTACHMENT.equalsIgnoreCase(disposition)
+                    || (fileName != null && !fileName.isBlank());
+
+            if (part.getContent() instanceof Multipart nestedMultipart) {
+                extractAttachmentsFromContent(nestedMultipart, attachmentsDir);
+            }
+
+            if (!isAttachment || fileName == null || fileName.isBlank()) {
+                continue;
+            }
+
+            String safeName = sanitizeFileName(fileName);
+            Path target = attachmentsDir.resolve(safeName);
+            if (Files.exists(target)) {
+                target = nextAvailablePath(target);
+            }
+
+            try (InputStream attachmentStream = part.getInputStream()) {
+                Files.copy(attachmentStream, target, StandardCopyOption.REPLACE_EXISTING);
+            } catch (Exception e) {
+                logger.warn("Ошибка сохранения вложения {}: {}", fileName, e.getMessage());
+            }
+        }
+    }
+
+    private boolean isEmlFile(Path source) {
+        String lower = source.getFileName().toString().toLowerCase(Locale.ROOT);
+        return lower.endsWith(".eml");
+    }
+
+    private String sanitizeFileName(String fileName) {
+        return fileName.replaceAll("[\\/:*?\"<>|]", "_");
     }
 
     private Set<Path> sanitize(List<Path> inputFiles) {

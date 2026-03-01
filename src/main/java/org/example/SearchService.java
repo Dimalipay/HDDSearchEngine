@@ -52,7 +52,10 @@ public class SearchService implements AutoCloseable {
         this.config = config;
         this.indexPaths = indexPaths;
         this.analyzer = AnalyzerProvider.getMultilingualAnalyzer();
-        this.tikaService = new TikaService(config.getTikaMaxStringLength(), config.getTikaTimeoutSeconds());
+        // Для предпросмотра нужно уметь извлекать OCR-текст из скан-PDF/изображений,
+        // иначе подсветка не найдёт фрагменты, хотя совпадение уже есть в индексе.
+        this.tikaService = new TikaService(config.getTikaMaxStringLength(), config.getTikaTimeoutSeconds(),
+                true, config.getOcrLanguage());
     }
 
     public List<FileResult> searchInFields(String keyword, String field) throws Exception {

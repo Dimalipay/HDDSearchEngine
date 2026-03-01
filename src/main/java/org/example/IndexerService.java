@@ -20,6 +20,7 @@ import java.util.Set;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import java.util.function.BooleanSupplier;
 
@@ -47,6 +48,9 @@ public class IndexerService {
 
     // ── OCR флаг ─────────────────────────────────────────────────────────────
     private final boolean ocrEnabled;
+
+    /** Принудительная остановка индексации через UI-горячие клавиши/кнопку. */
+    private final AtomicBoolean stopRequested = new AtomicBoolean(false);
 
     // ── Callback с поддержкой прогресса ─────────────────────────────────────
     /**
@@ -84,6 +88,7 @@ public class IndexerService {
     public void runIncrementalIndexing(String dataPath,
                                        ProgressCallback onProgress,
                                        BooleanSupplier cancellation) throws IOException {
+        stopRequested.set(false);
         if (!Files.exists(indexPath)) {
             Files.createDirectories(indexPath);
         }
@@ -92,7 +97,7 @@ public class IndexerService {
         int totalFiles = countIndexableFiles(dataPath, cancellation);
         logger.info("Предварительный подсчёт: {} файлов для индексации в {}", totalFiles, dataPath);
 
-        if (cancellation.getAsBoolean()) {
+        if (isCancelled(cancellation)) {
             throw new CancellationException("Индексация остановлена пользователем");
         }
 
@@ -123,12 +128,12 @@ public class IndexerService {
                 Files.walkFileTree(Paths.get(dataPath), new SimpleFileVisitor<>() {
                     @Override
                     public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                        if (cancellation.getAsBoolean()) {
+                        if (isCancelled(cancellation)) {
                             executor.shutdownNow();
                             return FileVisitResult.TERMINATE;
                         }
                         executor.submit(() -> {
-                            if (cancellation.getAsBoolean()) return;
+                            if (isCancelled(cancellation)) return;
                             try {
                                 processFile(writer, searcher, file, attrs,
                                         counter, finalTotal, onProgress, tikaService);
@@ -149,7 +154,7 @@ public class IndexerService {
                 executor.awaitTermination(7, TimeUnit.DAYS);
             }
 
-            if (!cancellation.getAsBoolean()) {
+            if (!isCancelled(cancellation)) {
                 writer.commit();
                 if (writer.hasDeletions()) {
                     writer.forceMerge(1);
@@ -167,6 +172,14 @@ public class IndexerService {
         }
     }
 
+    public void stop() {
+        stopRequested.set(true);
+    }
+
+    private boolean isCancelled(BooleanSupplier cancellation) {
+        return stopRequested.get() || cancellation.getAsBoolean();
+    }
+
     /**
      * Быстрый проход по дереву для подсчёта файлов, которые будут проиндексированы.
      * Применяет ту же логику shouldSkip, что и основная индексация.
@@ -177,7 +190,7 @@ public class IndexerService {
             Files.walkFileTree(Paths.get(dataPath), new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                    if (cancellation.getAsBoolean()) return FileVisitResult.TERMINATE;
+                    if (isCancelled(cancellation)) return FileVisitResult.TERMINATE;
                     if (!shouldSkip(file.toAbsolutePath().toString())) {
                         count.incrementAndGet();
                     }

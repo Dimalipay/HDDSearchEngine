@@ -1,5 +1,7 @@
 package org.example.index;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -12,12 +14,10 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public class IndexRegistry {
     private static final Logger logger = LoggerFactory.getLogger(IndexRegistry.class);
-    private static final Pattern OBJECT_PATTERN = Pattern.compile("\\{(.*?)\\}", Pattern.DOTALL);
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private final Path registryFile;
 
@@ -30,21 +30,8 @@ public class IndexRegistry {
             return new ArrayList<>();
         }
         try {
-            String json = Files.readString(registryFile);
-            List<IndexEntry> entries = new ArrayList<>();
-            Matcher matcher = OBJECT_PATTERN.matcher(json);
-            while (matcher.find()) {
-                String obj = matcher.group(1);
-                entries.add(new IndexEntry(
-                        readString(obj, "path").orElse(""),
-                        readString(obj, "index_path").orElse(""),
-                        readString(obj, "last_indexed").orElse(""),
-                        readLong(obj, "documents_count").orElse(0L),
-                        readLong(obj, "index_size_bytes").orElse(0L),
-                        readString(obj, "status").orElse("UNKNOWN")
-                ));
-            }
-            return entries;
+            List<IndexEntry> entries = OBJECT_MAPPER.readValue(registryFile.toFile(), new TypeReference<>() {});
+            return entries != null ? entries : new ArrayList<>();
         } catch (IOException e) {
             logger.warn("Не удалось прочитать {}: {}", registryFile, e.getMessage());
             return new ArrayList<>();
@@ -54,25 +41,7 @@ public class IndexRegistry {
     public synchronized void save(List<IndexEntry> entries) {
         try {
             Files.createDirectories(registryFile.getParent());
-            StringBuilder sb = new StringBuilder();
-            sb.append("[\n");
-            for (int i = 0; i < entries.size(); i++) {
-                IndexEntry e = entries.get(i);
-                sb.append("  {\n")
-                        .append("    \"path\": \"").append(escape(e.path())).append("\",\n")
-                        .append("    \"index_path\": \"").append(escape(e.indexPath())).append("\",\n")
-                        .append("    \"last_indexed\": \"").append(escape(e.lastIndexed())).append("\",\n")
-                        .append("    \"documents_count\": ").append(e.documentsCount()).append(",\n")
-                        .append("    \"index_size_bytes\": ").append(e.indexSizeBytes()).append(",\n")
-                        .append("    \"status\": \"").append(escape(e.status())).append("\"\n")
-                        .append("  }");
-                if (i < entries.size() - 1) {
-                    sb.append(",");
-                }
-                sb.append("\n");
-            }
-            sb.append("]\n");
-            Files.writeString(registryFile, sb.toString());
+            OBJECT_MAPPER.writerWithDefaultPrettyPrinter().writeValue(registryFile.toFile(), entries);
         } catch (IOException e) {
             logger.error("Не удалось сохранить {}: {}", registryFile, e.getMessage(), e);
         }
@@ -127,32 +96,6 @@ public class IndexRegistry {
 
     public static IndexEntry failedEntry(String sourcePath, Path indexPath) {
         return new IndexEntry(sourcePath, indexPath.toString(), Instant.now().toString(), 0, 0, "FAILED");
-    }
-
-    private Optional<String> readString(String jsonObject, String key) {
-        Pattern p = Pattern.compile("\\\"" + key + "\\\"\\s*:\\s*\\\"(.*?)\\\"");
-        Matcher m = p.matcher(jsonObject);
-        if (m.find()) {
-            return Optional.of(unescape(m.group(1)));
-        }
-        return Optional.empty();
-    }
-
-    private Optional<Long> readLong(String jsonObject, String key) {
-        Pattern p = Pattern.compile("\\\"" + key + "\\\"\\s*:\\s*(\\d+)");
-        Matcher m = p.matcher(jsonObject);
-        if (m.find()) {
-            return Optional.of(Long.parseLong(m.group(1)));
-        }
-        return Optional.empty();
-    }
-
-    private String escape(String value) {
-        return value.replace("\\", "\\\\").replace("\"", "\\\"");
-    }
-
-    private String unescape(String value) {
-        return value.replace("\\\"", "\"").replace("\\\\", "\\");
     }
 
     public record IndexEntry(String path,
