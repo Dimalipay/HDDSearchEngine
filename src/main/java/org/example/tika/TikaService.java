@@ -13,7 +13,9 @@ import org.slf4j.LoggerFactory;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Locale;
 import java.util.concurrent.*;
+import org.xml.sax.SAXException;
 
 public class TikaService implements AutoCloseable {
     private static final Logger logger = LoggerFactory.getLogger(TikaService.class);
@@ -118,7 +120,16 @@ public class TikaService implements AutoCloseable {
         BodyContentHandler handler = new BodyContentHandler(maxStringLength > 0 ? maxStringLength : -1);
 
         try (InputStream stream = Files.newInputStream(path)) {
-            parser.parse(stream, handler, metadata, context);
+            try {
+                parser.parse(stream, handler, metadata, context);
+            } catch (SAXException sax) {
+                if (isWriteLimitReached(sax)) {
+                    logger.warn("OCR {} превысил лимит {} символов. Текст усечён.",
+                            path.getFileName(), maxStringLength);
+                } else {
+                    throw sax;
+                }
+            }
         }
 
         String result = handler.toString();
@@ -126,18 +137,38 @@ public class TikaService implements AutoCloseable {
         return result;
     }
 
+    private boolean isWriteLimitReached(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            if (current.getClass().getSimpleName().contains("WriteLimitReachedException")) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
     private boolean isTextFile(Path p) {
-        return p.getFileName().toString().toLowerCase().endsWith(".txt");
+        return "txt".equals(getExtension(p));
     }
 
     private boolean isPdfFile(Path p) {
-        return p.getFileName().toString().toLowerCase().endsWith(".pdf");
+        return "pdf".equals(getExtension(p));
     }
 
     private boolean isImageFile(Path p) {
-        String n = p.getFileName().toString().toLowerCase();
-        return n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".png")
-                || n.endsWith(".tiff") || n.endsWith(".tif") || n.endsWith(".bmp")
-                || n.endsWith(".gif");
+        String ext = getExtension(p);
+        return "jpg".equals(ext) || "jpeg".equals(ext) || "png".equals(ext)
+                || "tiff".equals(ext) || "tif".equals(ext) || "bmp".equals(ext)
+                || "gif".equals(ext);
+    }
+
+    private String getExtension(Path path) {
+        String fileName = path.getFileName().toString();
+        int dotIndex = fileName.lastIndexOf('.');
+        if (dotIndex < 0 || dotIndex == fileName.length() - 1) {
+            return "";
+        }
+        return fileName.substring(dotIndex + 1).toLowerCase(Locale.ROOT);
     }
 }
