@@ -18,9 +18,7 @@ import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.List;
-import java.util.Map;
+import java.util.Locale;
 import java.util.concurrent.*;
 import org.xml.sax.SAXException;
 
@@ -289,29 +287,26 @@ public class TikaService implements AutoCloseable {
     }
 
     private boolean isTextFile(Path p) {
-        return getExtension(p).equals("txt");
+        return "txt".equals(getExtension(p));
     }
 
     private boolean isPdfFile(Path p) {
-        return getExtension(p).equals("pdf");
+        return "pdf".equals(getExtension(p));
     }
 
     private boolean isImageFile(Path p) {
         String ext = getExtension(p);
-        return ext.equals("jpg") || ext.equals("jpeg") || ext.equals("png")
-                || ext.equals("tiff") || ext.equals("tif") || ext.equals("bmp")
-                || ext.equals("gif");
+        return "jpg".equals(ext) || "jpeg".equals(ext) || "png".equals(ext)
+                || "tiff".equals(ext) || "tif".equals(ext) || "bmp".equals(ext)
+                || "gif".equals(ext);
     }
 
-    /**
-     * Email-форматы, требующие рекурсивного парсинга.
-     * .pst / .ost — весь почтовый ящик Outlook (требует java-libpst)
-     * .msg         — одно письмо Outlook (сохранённое вручную)
-     * .eml         — стандартный формат письма (RFC 822)
-     */
-    private boolean isEmailFile(Path p) {
-        String ext = getExtension(p);
-        return ext.equals("pst") || ext.equals("ost")
-                || ext.equals("msg") || ext.equals("eml");
+    private String getExtension(Path path) {
+        String fileName = path.getFileName().toString();
+        int dotIndex = fileName.lastIndexOf('.');
+        if (dotIndex < 0 || dotIndex == fileName.length() - 1) {
+            return "";
+        }
+        return fileName.substring(dotIndex + 1).toLowerCase(Locale.ROOT);
     }
 }
