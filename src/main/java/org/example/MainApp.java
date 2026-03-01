@@ -77,6 +77,16 @@ public class MainApp extends Application {
     @Override
     public void start(Stage primaryStage) {
         logger.info("Запуск приложения. Lucene: {}", config.getLuceneVersion());
+
+        // ── Tesseract: добавляем бандл в PATH до любых проверок OCR ─────────
+        // Если рядом с .exe лежит папка tesseract\ — добавляем её в PATH процесса,
+        // чтобы Tika 2.x нашла tesseract.exe. Выполняется один раз на главном потоке.
+        String bundledTesseract = org.example.tika.TikaService.resolveTesseractPath();
+        if (bundledTesseract != null) {
+            org.example.tika.TikaService.injectIntoPath(bundledTesseract);
+            logger.info("Tesseract бандл добавлен в PATH: {}", bundledTesseract);
+        }
+
         primaryStage.setTitle("HDD Search Engine");
 
         // ── Tables ──────────────────────────────────────────────────────────

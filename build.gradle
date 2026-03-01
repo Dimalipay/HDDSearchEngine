@@ -30,8 +30,13 @@ tasks.withType(JavaCompile) {
 }
 
 application {
-    // Точка входа в приложение
     mainClass = 'org.example.MainApp'
+
+    // Открываем внутренние пакеты JVM для рефлексии (нужно для injectIntoPath в TikaService)
+    applicationDefaultJvmArgs = [
+            '--add-opens', 'java.base/java.lang=ALL-UNNAMED',
+            '--add-opens', 'java.base/java.util=ALL-UNNAMED',
+    ]
 }
 
 dependencies {
@@ -51,6 +56,12 @@ dependencies {
     implementation 'org.apache.pdfbox:fontbox:2.0.31'
     implementation 'org.apache.pdfbox:xmpbox:2.0.31'
     implementation 'org.apache.pdfbox:jempbox:1.8.17'
+    implementation 'com.github.jai-imageio:jai-imageio-jpeg2000:1.4.0'
+
+    // --- Email: PST/OST/MSG/EML (Outlook и стандартные письма) ---
+    // java-libpst нужна для чтения .pst и .ost файлов (весь почтовый ящик Outlook)
+    // .msg и .eml работают без неё — через стандартный Tika-парсер
+    implementation 'com.pff:java-libpst:0.9.3'
 
     // --- Metadata extractor (EXIF для фото) ---
     implementation 'com.drewnoakes:metadata-extractor:2.19.0'
@@ -87,4 +98,37 @@ configurations.all {
 
 test {
     useJUnitPlatform()
+}
+
+// ─── Tesseract бандл ──────────────────────────────────────────────────────────
+// Папка tesseract-bundle/ должна лежать в корне проекта рядом с build.gradle.
+// Содержимое: tesseract.exe, все *.dll, папка tessdata/ с rus.traineddata и eng.traineddata.
+// Если папка отсутствует — задача пропускается (не ошибка, удобно для CI).
+
+def tesseractBundleDir = file('tesseract-bundle')
+
+// Копирует tesseract-bundle/ -> build/installer-input/tesseract/
+tasks.register('copyTesseract', Copy) {
+    onlyIf { tesseractBundleDir.exists() }
+    from tesseractBundleDir
+    into layout.buildDirectory.dir('installer-input/tesseract')
+    doFirst {
+        logger.lifecycle("Копируем Tesseract: ${tesseractBundleDir}")
+    }
+    doLast {
+        logger.lifecycle("Tesseract бандл скопирован.")
+    }
+}
+
+// Подключаем copyTesseract к jpackage если такая задача существует
+// (плагин org.beryx.jlink или аналог)
+afterEvaluate {
+    if (tasks.findByName('jpackage')) {
+        tasks.named('jpackage') {
+            dependsOn 'copyTesseract'
+            appContent = [
+                    layout.buildDirectory.dir('installer-input/tesseract').get().asFile
+            ]
+        }
+    }
 }
