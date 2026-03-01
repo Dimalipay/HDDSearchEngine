@@ -69,7 +69,7 @@ public class SearchService implements AutoCloseable {
             IndexSearcher searcher = new IndexSearcher(reader);
             QueryParser parser = createParser(field);
             Query query = parser.parse(keyword);
-            TopDocs hits = searcher.search(query, 100);
+            TopDocs hits = searcher.search(query, 1000);
 
             for (ScoreDoc scoreDoc : hits.scoreDocs) {
                 Document doc = searcher.storedFields().document(scoreDoc.doc);
