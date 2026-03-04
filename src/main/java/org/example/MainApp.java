@@ -8,8 +8,7 @@ import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
-import javafx.scene.control.cell.PropertyValueFactory;
-import javafx.scene.layout.HBox;
+import javafx.scene.control.cell.PropertyValueFactory;import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
@@ -251,15 +250,30 @@ public class MainApp extends Application {
         searchRow.setMaxWidth(560);
         HBox.setHgrow(searchField, Priority.ALWAYS);
 
-        HBox topBar = new HBox(20, appTitle, titleSpacer, searchRow);
+        // ── Кнопка настроек ⚙️ — в правом углу топ-бара ─────────────────────
+        Button btnSettings = new Button("⚙");
+        btnSettings.setTooltip(new Tooltip("Настройки приложения"));
+        btnSettings.setStyle(
+                "-fx-background-color:transparent;-fx-text-fill:" + C_TEXT_SEC + ";" +
+                        "-fx-font-size:16px;-fx-cursor:hand;-fx-padding:4 8 4 8;" +
+                        "-fx-background-radius:4;");
+        btnSettings.setOnMouseEntered(e -> btnSettings.setStyle(
+                "-fx-background-color:" + C_CONTROL + ";-fx-text-fill:" + C_TEXT + ";" +
+                        "-fx-font-size:16px;-fx-cursor:hand;-fx-padding:4 8 4 8;" +
+                        "-fx-background-radius:4;"));
+        btnSettings.setOnMouseExited(e -> btnSettings.setStyle(
+                "-fx-background-color:transparent;-fx-text-fill:" + C_TEXT_SEC + ";" +
+                        "-fx-font-size:16px;-fx-cursor:hand;-fx-padding:4 8 4 8;" +
+                        "-fx-background-radius:4;"));
+        btnSettings.setOnAction(e -> showSettingsDialog(primaryStage));
+
+        HBox topBar = new HBox(16, appTitle, titleSpacer, searchRow, btnSettings);
         topBar.setAlignment(Pos.CENTER_LEFT);
         topBar.setPadding(new Insets(12, 20, 12, 20));
         topBar.setStyle(
                 "-fx-background-color:" + C_PANEL + ";" +
                         "-fx-effect:dropshadow(gaussian,rgba(0,0,0,0.45),10,0,0,3);"
         );
-
-        // ── Sidebar ──────────────────────────────────────────────────────────
         HBox diskRow = new HBox(8, disksCombo, btnChooseDirectory);
         diskRow.setAlignment(Pos.CENTER_LEFT);
         HBox.setHgrow(disksCombo, Priority.ALWAYS);
@@ -348,7 +362,241 @@ public class MainApp extends Application {
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    //  Новый функционал: удаление индекса
+    //  Диалог настроек
+    // ════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Диалог ⚙️ настроек.
+     * Отображает текущие значения из {@code config}, при сохранении пишет их
+     * в {@link java.util.prefs.Preferences} через {@link SearchConfig#save}.
+     * Изменения применяются при следующем запуске приложения
+     * (т.к. config неизменяем после загрузки).
+     */
+    private void showSettingsDialog(Stage owner) {
+        Stage dialog = new Stage();
+        dialog.initOwner(owner);
+        dialog.initModality(Modality.APPLICATION_MODAL);
+        dialog.setTitle("Настройки");
+        dialog.setResizable(false);
+
+        String fieldStyle =
+                "-fx-background-color:#3d3d3d;-fx-text-fill:#ffffff;" +
+                        "-fx-border-color:#555;-fx-border-width:1;-fx-border-radius:4;" +
+                        "-fx-background-radius:4;-fx-padding:6 10 6 10;" +
+                        "-fx-font-size:12px;-fx-font-family:'Segoe UI';";
+        String labelStyle =
+                "-fx-text-fill:#cccccc;-fx-font-size:12px;-fx-font-family:'Segoe UI';";
+        String hintStyle =
+                "-fx-text-fill:#666666;-fx-font-size:10px;-fx-font-family:'Segoe UI';";
+
+        // ── Папка индексов ────────────────────────────────────────────────────
+        Label lblIndexPath = new Label("Папка индексов");
+        lblIndexPath.setStyle(labelStyle);
+        TextField tfIndexPath = new TextField(config.getIndexPath().toString());
+        tfIndexPath.setStyle(fieldStyle);
+        tfIndexPath.setPrefWidth(340);
+        Button btnBrowse = new Button("📁");
+        btnBrowse.setStyle(
+                "-fx-background-color:#3d3d3d;-fx-text-fill:#cccccc;" +
+                        "-fx-border-color:#555;-fx-border-width:1;-fx-border-radius:4;" +
+                        "-fx-background-radius:4;-fx-cursor:hand;-fx-padding:6 10 6 10;");
+        btnBrowse.setOnAction(e -> {
+            DirectoryChooser dc = new DirectoryChooser();
+            dc.setTitle("Выберите папку для индексов");
+            try { dc.setInitialDirectory(config.getIndexPath().toFile()); } catch (Exception ignored) {}
+            File chosen = dc.showDialog(dialog);
+            if (chosen != null) tfIndexPath.setText(chosen.getAbsolutePath());
+        });
+        HBox indexPathRow = new HBox(6, tfIndexPath, btnBrowse);
+        indexPathRow.setAlignment(Pos.CENTER_LEFT);
+        HBox.setHgrow(tfIndexPath, Priority.ALWAYS);
+        Label hintIndexPath = new Label("Папка где хранятся файлы индекса Lucene. Изменение вступит в силу при следующем запуске.");
+        hintIndexPath.setStyle(hintStyle);
+        hintIndexPath.setWrapText(true);
+
+        // ── Потоки индексации ─────────────────────────────────────────────────
+        Label lblThreads = new Label("Потоки индексации");
+        lblThreads.setStyle(labelStyle);
+        Spinner<Integer> spThreads = new Spinner<>(1, Runtime.getRuntime().availableProcessors() * 2,
+                config.getIndexingThreads());
+        spThreads.setEditable(true);
+        spThreads.setPrefWidth(100);
+        spThreads.setStyle("-fx-font-size:12px;");
+        Label hintThreads = new Label("Рекомендуется: кол-во ядер ЦП (" +
+                Runtime.getRuntime().availableProcessors() + "). Больше — быстрее для SSD, " +
+                "но перегружает CPU при OCR.");
+        hintThreads.setStyle(hintStyle);
+        hintThreads.setWrapText(true);
+
+        // ── RAM-буфер ─────────────────────────────────────────────────────────
+        Label lblRam = new Label("RAM-буфер индексатора (МБ)");
+        lblRam.setStyle(labelStyle);
+        Spinner<Integer> spRam = new Spinner<>(16, 4096, (int) config.getRamBufferSizeMB(), 64);
+        spRam.setEditable(true);
+        spRam.setPrefWidth(100);
+        spRam.setStyle("-fx-font-size:12px;");
+        Label hintRam = new Label("Больше RAM → быстрее запись индекса, реже сбросы на диск. 256 МБ — оптимум.");
+        hintRam.setStyle(hintStyle);
+        hintRam.setWrapText(true);
+
+        // ── Таймаут Tika ──────────────────────────────────────────────────────
+        Label lblTimeout = new Label("Таймаут Tika (сек)");
+        lblTimeout.setStyle(labelStyle);
+        Spinner<Integer> spTimeout = new Spinner<>(1, 3600, config.getTikaTimeoutSeconds(), 10);
+        spTimeout.setEditable(true);
+        spTimeout.setPrefWidth(100);
+        spTimeout.setStyle("-fx-font-size:12px;");
+        Label hintTimeout = new Label("Максимальное время обработки одного файла. " +
+                "Увеличьте до 120–300 сек если OCR не успевает обработать большие скан-PDF.");
+        hintTimeout.setStyle(hintStyle);
+        hintTimeout.setWrapText(true);
+
+        // ── Макс. символов из файла ───────────────────────────────────────────
+        Label lblMaxStr = new Label("Макс. символов из файла");
+        lblMaxStr.setStyle(labelStyle);
+        Spinner<Integer> spMaxStr = new Spinner<>(10_000, 5_000_000,
+                config.getTikaMaxStringLength(), 50_000);
+        spMaxStr.setEditable(true);
+        spMaxStr.setPrefWidth(120);
+        spMaxStr.setStyle("-fx-font-size:12px;");
+        Label hintMaxStr = new Label("Tika обрежет текст файла до этого размера. " +
+                "200 000 — оптимум. Увеличьте для очень больших документов.");
+        hintMaxStr.setStyle(hintStyle);
+        hintMaxStr.setWrapText(true);
+
+        // ── Языки OCR ─────────────────────────────────────────────────────────
+        Label lblOcr = new Label("Языки OCR (Tesseract)");
+        lblOcr.setStyle(labelStyle);
+        TextField tfOcr = new TextField(config.getOcrLanguage());
+        tfOcr.setStyle(fieldStyle);
+        tfOcr.setPrefWidth(200);
+        Label hintOcr = new Label("Языки через '+': rus+eng, eng, deu+eng. " +
+                "Языковые файлы .traineddata должны быть в папке tessdata.");
+        hintOcr.setStyle(hintStyle);
+        hintOcr.setWrapText(true);
+
+        // ── Сборка формы ──────────────────────────────────────────────────────
+        VBox form = new VBox(10,
+                lblIndexPath, indexPathRow, hintIndexPath,
+                separator(),
+                lblThreads,  spThreads,  hintThreads,
+                separator(),
+                lblRam,      spRam,       hintRam,
+                separator(),
+                lblTimeout,  spTimeout,   hintTimeout,
+                separator(),
+                lblMaxStr,   spMaxStr,    hintMaxStr,
+                separator(),
+                lblOcr,      tfOcr,       hintOcr
+        );
+        form.setPadding(new Insets(20, 24, 8, 24));
+
+        // ── Кнопки ────────────────────────────────────────────────────────────
+        Button btnSave  = fluentButton("💾  Сохранить", "primary");
+        Button btnReset = fluentButton("↺  Сбросить к умолчаниям", "secondary");
+        Button btnCancel = fluentButton("Отмена", "secondary");
+
+        btnSave.setPrefWidth(160);
+        btnReset.setPrefWidth(200);
+        btnCancel.setPrefWidth(100);
+
+        // Подсказка «вступит в силу после перезапуска»
+        Label lblRestartNote = new Label("⚠  Изменения вступят в силу после перезапуска приложения.");
+        lblRestartNote.setStyle("-fx-text-fill:#f0c040;-fx-font-size:11px;-fx-font-family:'Segoe UI';");
+        lblRestartNote.setVisible(false);
+
+        btnSave.setOnAction(e -> {
+            // Валидация
+            String indexPathVal = tfIndexPath.getText().trim();
+            if (indexPathVal.isBlank()) {
+                showAlertOnDialog(dialog, "Ошибка", "Папка индексов не может быть пустой.");
+                return;
+            }
+            String ocrLang = tfOcr.getText().trim();
+            if (ocrLang.isBlank()) {
+                showAlertOnDialog(dialog, "Ошибка", "Укажите хотя бы один язык OCR (например: rus+eng).");
+                return;
+            }
+            // Фиксируем значения Spinner (если редактировались вручную)
+            spThreads.commitValue();
+            spRam.commitValue();
+            spTimeout.commitValue();
+            spMaxStr.commitValue();
+
+            SearchConfig.save(
+                    indexPathVal,
+                    spRam.getValue().doubleValue(),
+                    spThreads.getValue(),
+                    spTimeout.getValue(),
+                    spMaxStr.getValue(),
+                    ocrLang
+            );
+
+            lblRestartNote.setVisible(true);
+            btnSave.setDisable(true);
+        });
+
+        btnReset.setOnAction(e -> {
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                    "Сбросить все настройки к значениям по умолчанию?",
+                    ButtonType.YES, ButtonType.NO);
+            confirm.setTitle("Сброс настроек");
+            confirm.initOwner(dialog);
+            confirm.showAndWait().ifPresent(bt -> {
+                if (bt == ButtonType.YES) {
+                    SearchConfig.resetToDefaults();
+                    // Обновляем поля в форме дефолтными значениями
+                    tfIndexPath.setText("search-index");
+                    spThreads.getValueFactory().setValue(SearchConfig.getDefaultIndexingThreads());
+                    spRam.getValueFactory().setValue((int) SearchConfig.getDefaultRamBufferMB());
+                    spTimeout.getValueFactory().setValue(SearchConfig.getDefaultTikaTimeout());
+                    spMaxStr.getValueFactory().setValue(SearchConfig.getDefaultTikaMaxString());
+                    tfOcr.setText(SearchConfig.getDefaultOcrLanguage());
+                    lblRestartNote.setVisible(true);
+                    btnSave.setDisable(false);
+                }
+            });
+        });
+
+        btnCancel.setOnAction(e -> dialog.close());
+
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+        HBox buttonsRow = new HBox(8, btnReset, spacer, btnCancel, btnSave);
+        buttonsRow.setAlignment(Pos.CENTER_RIGHT);
+        buttonsRow.setPadding(new Insets(12, 24, 16, 24));
+
+        VBox root = new VBox(0, form, lblRestartNote, buttonsRow);
+        VBox.setMargin(lblRestartNote, new Insets(8, 24, 0, 24));
+        root.setStyle("-fx-background-color:#2d2d2d;");
+
+        dialog.setScene(new Scene(root, 500, 620));
+        dialog.getScene().getStylesheets().addAll(owner.getScene().getStylesheets());
+        dialog.show();
+    }
+
+    /** Тонкий разделитель между секциями формы настроек. */
+    private Region separator() {
+        Region line = new Region();
+        line.setPrefHeight(1);
+        line.setMaxWidth(Double.MAX_VALUE);
+        line.setStyle("-fx-background-color:#3a3a3a;");
+        VBox.setMargin(line, new Insets(2, 0, 2, 0));
+        return line;
+    }
+
+    /** Alert с явным owner — чтобы всплывал поверх диалога, а не за ним. */
+    private void showAlertOnDialog(Stage owner, String title, String msg) {
+        Alert alert = new Alert(Alert.AlertType.WARNING);
+        alert.initOwner(owner);
+        alert.setTitle(title);
+        alert.setHeaderText(null);
+        alert.setContentText(msg);
+        alert.showAndWait();
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  Удаление индекса
     // ════════════════════════════════════════════════════════════════════════
 
     private void deleteIndexDialog(Stage owner,

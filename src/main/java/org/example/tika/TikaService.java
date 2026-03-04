@@ -1,29 +1,45 @@
 package org.example.tika;
 
 import org.apache.tika.Tika;
+import org.apache.tika.extractor.EmbeddedDocumentExtractor;
 import org.apache.tika.metadata.Metadata;
+import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.parser.AutoDetectParser;
 import org.apache.tika.parser.ParseContext;
 import org.apache.tika.parser.Parser;
 import org.apache.tika.parser.RecursiveParserWrapper;
 import org.apache.tika.parser.ocr.TesseractOCRConfig;
-import org.apache.tika.metadata.TikaCoreProperties;
 import org.apache.tika.sax.BasicContentHandlerFactory;
 import org.apache.tika.sax.BodyContentHandler;
+import org.apache.tika.sax.ContentHandlerFactory;
 import org.apache.tika.sax.RecursiveParserWrapperHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.xml.sax.ContentHandler;
+import org.xml.sax.SAXException;
+import org.xml.sax.helpers.DefaultHandler;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.*;
-import org.xml.sax.SAXException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class TikaService implements AutoCloseable {
     private static final Logger logger = LoggerFactory.getLogger(TikaService.class);
+
+    private static final Set<String> EMAIL_EXTENSIONS =
+            Set.of("eml", "msg", "pst", "ost", "mbox");
 
     private final int     maxStringLength;
     private final int     timeoutSeconds;
@@ -51,23 +67,15 @@ public class TikaService implements AutoCloseable {
         });
     }
 
-    // ── Публичный API ─────────────────────────────────────────────────────────
+    // ── Публичный API: извлечение текста ──────────────────────────────────────
 
     public String parseToString(Path path) throws Exception {
         Future<String> future = parserExecutor.submit(() -> {
-            if (isTextFile(path)) {
-                return TextFileReader.read(path, maxStringLength);
-            }
-            // Email-файлы и PST/OST — рекурсивный парсинг с извлечением вложений
-            if (isEmailFile(path)) {
-                return parseEmailRecursive(path);
-            }
-            if (ocrEnabled && (isImageFile(path) || isPdfFile(path))) {
-                return parseWithOcr(path);
-            }
+            if (isTextFile(path))  return TextFileReader.read(path, maxStringLength);
+            if (isEmailFile(path)) return parseEmailRecursive(path);
+            if (ocrEnabled && (isImageFile(path) || isPdfFile(path))) return parseWithOcr(path);
             return parseWithTika(path);
         });
-
         try {
             return future.get(timeoutSeconds, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
@@ -75,6 +83,108 @@ public class TikaService implements AutoCloseable {
             logger.warn("Превышен таймаут обработки {} ({} сек.)", path, timeoutSeconds);
             throw e;
         }
+    }
+
+    // ── Публичный API: извлечение вложений ────────────────────────────────────
+
+    /**
+     * Извлекает все вложения email-файла в папку {@code outputDir}.
+     *
+     * <p>Поддерживает все форматы через Tika {@link EmbeddedDocumentExtractor}:
+     * .eml, .msg, .pst, .ost, .mbox — в отличие от Jakarta Mail, который понимает
+     * только RFC 822 (.eml).</p>
+     *
+     * <p>Каждое вложение сохраняется под оригинальным именем.
+     * При конфликте имён: {@code file.pdf} → {@code file_(1).pdf}, {@code file_(2).pdf}.</p>
+     *
+     * @param emailPath путь к файлу письма
+     * @param outputDir папка назначения (создаётся автоматически)
+     * @return количество успешно сохранённых вложений
+     */
+    public int extractAttachmentsToDir(Path emailPath, Path outputDir) throws Exception {
+        Files.createDirectories(outputDir);
+
+        AutoDetectParser parser = new AutoDetectParser();
+        ParseContext context    = new ParseContext();
+        context.set(Parser.class, parser);
+
+        AtomicInteger count  = new AtomicInteger(0);
+        Set<String> usedNames = new LinkedHashSet<>();   // для разрешения конфликтов
+
+        context.set(EmbeddedDocumentExtractor.class, new EmbeddedDocumentExtractor() {
+
+            @Override
+            public boolean shouldParseEmbedded(Metadata meta) {
+                // Пропускаем части без имени — это тело письма, а не вложение
+                String name  = meta.get(TikaCoreProperties.RESOURCE_NAME_KEY);
+                String ctype = meta.get(Metadata.CONTENT_TYPE);
+                return name != null && !name.isBlank()
+                        && (ctype == null || !ctype.startsWith("message/"));
+            }
+
+            @Override
+            public void parseEmbedded(InputStream stream,
+                                      ContentHandler handler,
+                                      Metadata meta,
+                                      boolean outputHtml) throws IOException {
+                String rawName = meta.get(TikaCoreProperties.RESOURCE_NAME_KEY);
+                if (rawName == null || rawName.isBlank()) {
+                    rawName = "attachment_" + (count.get() + 1);
+                }
+
+                // Убираем символы запрещённые в Windows/Linux именах файлов
+                String safeName = rawName
+                        .replaceAll("[\\\\/:*?\"<>|\\r\\n\\t]", "_")
+                        .strip();
+                if (safeName.isBlank()) safeName = "attachment_" + (count.get() + 1);
+
+                // Уникальное имя в рамках этой папки
+                safeName = uniqueName(usedNames, safeName);
+                usedNames.add(safeName);
+
+                // Читаем весь поток: InputStream однопроходный, нельзя передавать дальше
+                byte[] bytes = stream.readAllBytes();
+                if (bytes.length == 0) return;  // пустое вложение — пропускаем
+
+                Path dest = outputDir.resolve(safeName);
+                Files.copy(new ByteArrayInputStream(bytes), dest,
+                        StandardCopyOption.REPLACE_EXISTING);
+                count.incrementAndGet();
+                logger.debug("  вложение: {} ({} байт)", dest.getFileName(), bytes.length);
+            }
+        });
+
+        Metadata rootMeta = new Metadata();
+        try (InputStream in = Files.newInputStream(emailPath)) {
+            // DefaultHandler — нас интересуют только байты вложений, не текст тела
+            parser.parse(in, new DefaultHandler(), rootMeta, context);
+        } catch (SAXException | org.apache.tika.exception.TikaException ex) {
+            // Частичный сбой не критичен: вложения до ошибки уже сохранены
+            logger.warn("Частичная ошибка разбора '{}' (вложения сохранены): {}",
+                    emailPath.getFileName(), ex.getMessage());
+        }
+
+        int total = count.get();
+        if (total > 0) {
+            logger.info("Из '{}' извлечено {} вложений → '{}'",
+                    emailPath.getFileName(), total, outputDir);
+        } else {
+            logger.info("В '{}' вложений не найдено", emailPath.getFileName());
+        }
+        return total;
+    }
+
+    // ── Статические утилиты ───────────────────────────────────────────────────
+
+    /**
+     * Возвращает {@code true} если расширение относится к email-формату.
+     * Используется из ExportService без создания экземпляра TikaService.
+     *
+     * @param extension расширение без точки, любой регистр ("eml", "MSG", ...)
+     */
+    public static boolean isEmailExtension(String extension) {
+        return extension != null
+                && EMAIL_EXTENSIONS.contains(extension.toLowerCase(Locale.ROOT));
     }
 
     // ── Tesseract ─────────────────────────────────────────────────────────────
@@ -108,21 +218,15 @@ public class TikaService implements AutoCloseable {
     public static String resolveTesseractPath() {
         try {
             Path jarLocation = Paths.get(
-                    TikaService.class
-                            .getProtectionDomain()
-                            .getCodeSource()
-                            .getLocation()
-                            .toURI()
-            );
+                    TikaService.class.getProtectionDomain()
+                            .getCodeSource().getLocation().toURI());
             Path appDir = jarLocation.getParent();
             if (appDir != null && "app".equalsIgnoreCase(appDir.getFileName().toString())) {
                 appDir = appDir.getParent();
             }
             if (appDir == null) return null;
             Path bundledExe = appDir.resolve("tesseract").resolve("tesseract.exe");
-            if (Files.exists(bundledExe)) {
-                return bundledExe.getParent().toString();
-            }
+            if (Files.exists(bundledExe)) return bundledExe.getParent().toString();
         } catch (Exception e) {
             logger.debug("Не удалось определить путь к приложению: {}", e.getMessage());
         }
@@ -137,14 +241,14 @@ public class TikaService implements AutoCloseable {
             theEnvironmentField.setAccessible(true);
             Map<String, String> env = (Map<String, String>) theEnvironmentField.get(null);
             String currentPath = env.getOrDefault("PATH", env.getOrDefault("Path", ""));
-            String separator = System.getProperty("os.name").toLowerCase().contains("win") ? ";" : ":";
+            String sep = System.getProperty("os.name").toLowerCase().contains("win") ? ";" : ":";
             if (!currentPath.contains(directory)) {
-                env.put("PATH", directory + separator + currentPath);
-                env.put("Path", directory + separator + currentPath);
+                env.put("PATH", directory + sep + currentPath);
+                env.put("Path", directory + sep + currentPath);
                 logger.info("Tesseract добавлен в PATH процесса: {}", directory);
             }
         } catch (Exception e) {
-            logger.warn("Не удалось добавить Tesseract в PATH через рефлексию: {}. " +
+            logger.warn("Не удалось добавить Tesseract в PATH: {}. " +
                     "Убедитесь что Tesseract установлен в системном PATH.", e.getMessage());
         }
     }
@@ -154,15 +258,12 @@ public class TikaService implements AutoCloseable {
         parserExecutor.shutdownNow();
     }
 
-    // ── Приватные методы ──────────────────────────────────────────────────────
+    // ── Приватные методы парсинга ─────────────────────────────────────────────
 
     /**
-     * Рекурсивный парсинг email-файлов: .eml, .msg, .pst, .ost
-     *
-     * RecursiveParserWrapper обходит письмо и ВСЕ его вложения (PDF, DOCX, изображения),
-     * извлекая текст из каждого. Результаты склеиваются в одну строку.
-     *
-     * Для PST/OST требуется зависимость com.pff:java-libpst в build.gradle.
+     * Рекурсивный парсинг email: RecursiveParserWrapper обходит письмо
+     * и ВСЕ его вложения (PDF, DOCX, изображения), склеивает текст.
+     * Для .pst/.ost требуется зависимость com.pff:java-libpst.
      */
     private String parseEmailRecursive(Path path) throws Exception {
         AutoDetectParser baseParser = new AutoDetectParser();
@@ -170,8 +271,6 @@ public class TikaService implements AutoCloseable {
 
         ParseContext context = new ParseContext();
         context.set(Parser.class, baseParser);
-
-        // Если OCR включён — добавляем конфигурацию Tesseract для изображений-вложений
         if (ocrEnabled) {
             TesseractOCRConfig ocrConfig = new TesseractOCRConfig();
             ocrConfig.setLanguage(ocrLanguage);
@@ -180,44 +279,30 @@ public class TikaService implements AutoCloseable {
 
         ContentHandlerFactory factory = new BasicContentHandlerFactory(
                 BasicContentHandlerFactory.HANDLER_TYPE.TEXT,
-                maxStringLength > 0 ? maxStringLength : -1
-        );
-
-        RecursiveParserWrapperHandler handler = new RecursiveParserWrapperHandler(
-                factory,
-                -1  // -1 = без ограничения глубины вложений
-        );
-
+                maxStringLength > 0 ? maxStringLength : -1);
+        RecursiveParserWrapperHandler handler =
+                new RecursiveParserWrapperHandler(factory, -1);
         Metadata metadata = new Metadata();
 
         try (InputStream stream = Files.newInputStream(path)) {
             wrapper.parse(stream, handler, metadata, context);
         }
 
-        // Собираем текст из письма + всех вложений
-        List<Metadata> metadataList = handler.getMetadataList();
+        List<Metadata> parts = handler.getMetadataList();
         StringBuilder sb = new StringBuilder();
-
-        for (int i = 0; i < metadataList.size(); i++) {
-            Metadata m = metadataList.get(i);
+        for (Metadata m : parts) {
             String content = m.get(TikaCoreProperties.TIKA_CONTENT);
-            if (content != null && !content.isBlank()) {
-                sb.append(content).append("\n");
-            }
+            if (content != null && !content.isBlank()) sb.append(content).append("\n");
         }
 
         String result = sb.toString().trim();
-        String ext = getExtension(path);
-
         if (result.isBlank()) {
-            logger.warn("Email {} — текст не извлечён. " +
-                            "Для .pst/.ost проверьте наличие зависимости java-libpst в build.gradle.",
-                    path.getFileName());
+            logger.warn("Email '{}' — текст не извлечён. " +
+                    "Для .pst/.ost проверьте зависимость java-libpst.", path.getFileName());
         } else {
-            logger.info("Email {} [.{}] — извлечено {} символов из {} частей (письмо + вложения).",
-                    path.getFileName(), ext, result.length(), metadataList.size());
+            logger.info("Email '{}' [.{}] — {} символов из {} частей.",
+                    path.getFileName(), getExtension(path), result.length(), parts.size());
         }
-
         return result;
     }
 
@@ -226,14 +311,12 @@ public class TikaService implements AutoCloseable {
         tika.setMaxStringLength(maxStringLength);
         String content = tika.parseToString(path);
         if (content != null && content.length() >= maxStringLength) {
-            logger.info("Текст из {} усечён до {} символов.", path, maxStringLength);
+            logger.info("Текст из '{}' усечён до {} символов.", path, maxStringLength);
         }
         if (isPdfFile(path)) {
             int len = content == null ? 0 : content.length();
-            logger.info("PDF {} извлечён: {} символов.", path, len);
-            if (len == 0) {
-                logger.warn("PDF {} — текст пустой. Это скан-PDF? Включите OCR.", path);
-            }
+            if (len == 0) logger.warn("PDF '{}' — текст пустой. Это скан-PDF? Включите OCR.", path);
+            else          logger.info("PDF '{}' — {} символов.", path, len);
         }
         return content;
     }
@@ -248,65 +331,67 @@ public class TikaService implements AutoCloseable {
         context.set(Parser.class, parser);
 
         Metadata metadata = new Metadata();
-        BodyContentHandler handler = new BodyContentHandler(maxStringLength > 0 ? maxStringLength : -1);
+        BodyContentHandler handler = new BodyContentHandler(
+                maxStringLength > 0 ? maxStringLength : -1);
 
         try (InputStream stream = Files.newInputStream(path)) {
             try {
                 parser.parse(stream, handler, metadata, context);
             } catch (SAXException sax) {
                 if (isWriteLimitReached(sax)) {
-                    logger.warn("OCR {} превысил лимит {} символов. Текст усечён.",
+                    logger.warn("OCR '{}' превысил лимит {} символов. Текст усечён.",
                             path.getFileName(), maxStringLength);
-                } else {
-                    throw sax;
-                }
+                } else throw sax;
             }
         }
 
         String result = handler.toString();
         if (result.isBlank()) {
-            logger.warn("OCR не извлёк текст из {}. " +
-                            "Проверьте языковые пакеты tessdata (rus.traineddata, eng.traineddata).",
-                    path.getFileName());
+            logger.warn("OCR не извлёк текст из '{}'. Проверьте tessdata.", path.getFileName());
         } else {
-            logger.info("OCR {} -> {} символов (язык: {}).",
+            logger.info("OCR '{}' → {} символов (язык: {}).",
                     path.getFileName(), result.length(), ocrLanguage);
         }
         return result;
     }
 
-    private boolean isWriteLimitReached(Throwable throwable) {
-        Throwable current = throwable;
-        while (current != null) {
-            if (current.getClass().getSimpleName().contains("WriteLimitReachedException")) {
-                return true;
-            }
-            current = current.getCause();
+    // ── Утилиты ───────────────────────────────────────────────────────────────
+
+    /** Уникальное имя: если {@code name} уже в {@code used} — добавляет суффикс _(1), _(2)... */
+    private static String uniqueName(Set<String> used, String name) {
+        if (!used.contains(name)) return name;
+        int dot = name.lastIndexOf('.');
+        String base = dot > 0 ? name.substring(0, dot) : name;
+        String ext  = dot > 0 ? name.substring(dot)    : "";
+        int i = 1;
+        String candidate;
+        do { candidate = base + "_(" + i++ + ")" + ext; }
+        while (used.contains(candidate));
+        return candidate;
+    }
+
+    private boolean isWriteLimitReached(Throwable t) {
+        while (t != null) {
+            if (t.getClass().getSimpleName().contains("WriteLimitReachedException")) return true;
+            t = t.getCause();
         }
         return false;
     }
 
-    private boolean isTextFile(Path p) {
-        return "txt".equals(getExtension(p));
+    private String getExtension(Path path) {
+        String name = path.getFileName().toString();
+        int dot = name.lastIndexOf('.');
+        return (dot >= 0 && dot < name.length() - 1)
+                ? name.substring(dot + 1).toLowerCase(Locale.ROOT) : "";
     }
 
-    private boolean isPdfFile(Path p) {
-        return "pdf".equals(getExtension(p));
-    }
+    private boolean isTextFile(Path p)  { return "txt".equals(getExtension(p)); }
+    private boolean isPdfFile(Path p)   { return "pdf".equals(getExtension(p)); }
+    private boolean isEmailFile(Path p) { return isEmailExtension(getExtension(p)); }
 
     private boolean isImageFile(Path p) {
-        String ext = getExtension(p);
-        return "jpg".equals(ext) || "jpeg".equals(ext) || "png".equals(ext)
-                || "tiff".equals(ext) || "tif".equals(ext) || "bmp".equals(ext)
-                || "gif".equals(ext);
-    }
-
-    private String getExtension(Path path) {
-        String fileName = path.getFileName().toString();
-        int dotIndex = fileName.lastIndexOf('.');
-        if (dotIndex < 0 || dotIndex == fileName.length() - 1) {
-            return "";
-        }
-        return fileName.substring(dotIndex + 1).toLowerCase(Locale.ROOT);
+        String e = getExtension(p);
+        return "jpg".equals(e) || "jpeg".equals(e) || "png".equals(e)
+                || "tiff".equals(e) || "tif".equals(e) || "bmp".equals(e) || "gif".equals(e);
     }
 }

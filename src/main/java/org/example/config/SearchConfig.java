@@ -131,6 +131,64 @@ public final class SearchConfig {
     /** Языковые пакеты Tesseract, разделённые '+'. Пример: {@code "rus+eng"}. */
     public String getOcrLanguage()          { return ocrLanguage; }
 
+    // ── Сохранение настроек ───────────────────────────────────────────────────
+
+    /**
+     * Сохраняет все параметры в {@link Preferences#userNodeForPackage}.
+     * При следующем запуске {@link #load()} прочитает их с приоритетом над .properties.
+     *
+     * <p>Передавайте {@code null} чтобы сбросить конкретный параметр к значению
+     * из .properties (или к дефолту). Передавайте пустую строку для строковых
+     * полей не допускается — будет проигнорировано.</p>
+     */
+    public static void save(String indexPath,
+                            double ramBufferMB,
+                            int    indexingThreads,
+                            int    tikaTimeoutSeconds,
+                            int    tikaMaxStringLength,
+                            String ocrLanguage) {
+        Preferences prefs = Preferences.userNodeForPackage(SearchConfig.class);
+        if (indexPath != null && !indexPath.isBlank()) {
+            prefs.put(KEY_INDEX_PATH, indexPath);
+        }
+        prefs.putDouble(KEY_RAM_BUFFER_MB,        ramBufferMB);
+        prefs.putInt   (KEY_INDEX_THREADS,         indexingThreads);
+        prefs.putInt   (KEY_TIKA_TIMEOUT_SECONDS,  tikaTimeoutSeconds);
+        prefs.putInt   (KEY_TIKA_MAX_STRING,       tikaMaxStringLength);
+        if (ocrLanguage != null && !ocrLanguage.isBlank()) {
+            prefs.put(KEY_OCR_LANGUAGE, ocrLanguage.trim());
+        }
+        try {
+            prefs.flush();
+            logger.info("Настройки сохранены в Preferences.");
+        } catch (java.util.prefs.BackingStoreException e) {
+            logger.warn("Не удалось записать Preferences на диск: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Сбрасывает все пользовательские настройки — при следующем запуске
+     * будут применены значения из .properties (или дефолты).
+     */
+    public static void resetToDefaults() {
+        Preferences prefs = Preferences.userNodeForPackage(SearchConfig.class);
+        try {
+            prefs.clear();
+            prefs.flush();
+            logger.info("Настройки сброшены к значениям по умолчанию.");
+        } catch (java.util.prefs.BackingStoreException e) {
+            logger.warn("Не удалось сбросить Preferences: {}", e.getMessage());
+        }
+    }
+
+    // ── Публичные константы дефолтов (нужны для отображения в UI) ────────────
+
+    public static int    getDefaultIndexingThreads()    { return DEFAULT_INDEX_THREADS; }
+    public static double getDefaultRamBufferMB()        { return DEFAULT_RAM_BUFFER_MB; }
+    public static int    getDefaultTikaTimeout()        { return DEFAULT_TIKA_TIMEOUT_SECONDS; }
+    public static int    getDefaultTikaMaxString()      { return DEFAULT_TIKA_MAX_STRING; }
+    public static String getDefaultOcrLanguage()        { return DEFAULT_OCR_LANGUAGE; }
+
     // ── Private helpers ───────────────────────────────────────────────────────
     private static Optional<String> readValue(Properties props, Preferences prefs, String key) {
         String pref = prefs.get(key, null);

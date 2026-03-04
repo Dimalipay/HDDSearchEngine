@@ -52,6 +52,14 @@ public class IndexerService {
     /** Принудительная остановка индексации через UI-горячие клавиши/кнопку. */
     private final AtomicBoolean stopRequested = new AtomicBoolean(false);
 
+    /**
+     * Время последнего вызова onProgress в наносекундах (System.nanoTime()).
+     * Используется для throttle: UI обновляется не чаще 10 раз в секунду,
+     * но при этом — при каждом файле, а не каждые 100.
+     * Это гарантирует отклик даже при OCR, где один файл занимает 30+ сек.
+     */
+    private final AtomicLong lastProgressNs = new AtomicLong(0);
+
     // ── Callback с поддержкой прогресса ─────────────────────────────────────
     /**
      * current  — сколько файлов обработано
@@ -245,8 +253,17 @@ public class IndexerService {
         indexFile(writer, file, lastModified, tikaService);
 
         int currentCount = counter.incrementAndGet();
-        if (onProgress != null && currentCount % 100 == 0) {
-            onProgress.onProgress(currentCount, total, file.getFileName().toString());
+        if (onProgress != null) {
+            // Throttle: обновляем UI не чаще 10 раз в секунду (каждые 100 мс).
+            // В отличие от % 100 это работает при любой скорости:
+            // - SSD без OCR: сотни файлов/сек — UI не перегружается
+            // - OCR: один файл 30+ сек — UI обновляется сразу после завершения
+            long now  = System.nanoTime();
+            long last = lastProgressNs.get();
+            if (now - last >= 100_000_000L                         // 100 мс в наносекундах
+                    && lastProgressNs.compareAndSet(last, now)) {  // atomic: только один поток пишет
+                onProgress.onProgress(currentCount, total, file.getFileName().toString());
+            }
         }
     }
 
