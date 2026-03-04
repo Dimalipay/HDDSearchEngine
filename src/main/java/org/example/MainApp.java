@@ -140,7 +140,7 @@ public class MainApp extends Application {
         lblTesseract.getStyleClass().add("meta-muted");
 
         backgroundExecutor.execute(() -> {
-            boolean ok = org.example.tika.TikaService.isTesseractInstalled();
+            boolean ok = org.example.tika.TikaService.isTesseractAvailable();
             Platform.runLater(() -> {
                 if (ok) {
                     String path = org.example.tika.TikaService.resolveTesseractPath();
