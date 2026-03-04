@@ -4,11 +4,15 @@ import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
+import javafx.beans.value.ChangeListener;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
-import javafx.scene.control.cell.PropertyValueFactory;import javafx.scene.layout.HBox;
+import javafx.scene.control.SplitPane;
+import javafx.scene.control.cell.PropertyValueFactory;
+import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
@@ -68,27 +72,24 @@ public class MainApp extends Application {
     private final AtomicReference<IndexerService> activeIndexer = new AtomicReference<>();
 
     // ─── Fluent Design colour tokens ────────────────────────────────────────
-    private static final String C_BG          = "#1c1c1e";
-    private static final String C_SURFACE      = "#252526";
-    private static final String C_PANEL        = "#2d2d2d";
-    private static final String C_BORDER       = "#3d3d3d";
-    private static final String C_ACCENT       = "#0078d4";
-    private static final String C_ACCENT_HOVER = "#106ebe";
-    private static final String C_TEXT         = "#ffffff";
-    private static final String C_TEXT_SEC     = "#cccccc";
-    private static final String C_TEXT_TER     = "#888888";
-    private static final String C_CONTROL      = "#3d3d3d";
-    private static final String C_CONTROL_H    = "#4d4d4d";
-    private static final String C_DANGER       = "#c42b1c";
-    private static final String C_DANGER_HOVER = "#a52315";
+    private static final String C_BG          = "#121417";
+    private static final String C_SURFACE      = "#1E2329";
+    private static final String C_PANEL        = "#1B1F24";
+    private static final String C_BORDER       = "#242A31";
+    private static final String C_ACCENT       = "#3B82F6";
+    private static final String C_ACCENT_HOVER = "#2563EB";
+    private static final String C_TEXT         = "#E6EAF0";
+    private static final String C_TEXT_SEC     = "#9BA3AF";
+    private static final String C_TEXT_TER     = "#6B7280";
+    private static final String C_CONTROL      = "#1E2329";
+    private static final String C_CONTROL_H    = "#242A31";
+    private static final String C_DANGER       = "#EF4444";
+    private static final String C_DANGER_HOVER = "#DC2626";
 
     @Override
     public void start(Stage primaryStage) {
         logger.info("Запуск приложения. Lucene: {}", config.getLuceneVersion());
 
-        // ── Tesseract: добавляем бандл в PATH до любых проверок OCR ─────────
-        // Если рядом с .exe лежит папка tesseract\ — добавляем её в PATH процесса,
-        // чтобы Tika 2.x нашла tesseract.exe. Выполняется один раз на главном потоке.
         String bundledTesseract = org.example.tika.TikaService.resolveTesseractPath();
         if (bundledTesseract != null) {
             org.example.tika.TikaService.injectIntoPath(bundledTesseract);
@@ -97,7 +98,6 @@ public class MainApp extends Application {
 
         primaryStage.setTitle("HDD Search Engine");
 
-        // ── Tables ──────────────────────────────────────────────────────────
         TableView<FileResult> nameTable = createTable();
         nameTable.setItems(nameResults);
         nameTable.setPlaceholder(styledPlaceholder("Нет результатов — выполните поиск"));
@@ -106,94 +106,99 @@ public class MainApp extends Application {
         contentTable.setItems(contentResults);
         contentTable.setPlaceholder(styledPlaceholder("Нет результатов — выполните поиск"));
 
-        // ── Info labels ──────────────────────────────────────────────────────
-        Label hddLabel         = metaLabel("Источник не выбран");
-        Label indexSizeLabel   = metaLabel("Размер: —");
+        Label hddLabel = metaLabel("Источник не выбран");
+        Label indexSizeLabel = metaLabel("Размер: —");
         Label indexStatusLabel = metaLabel("Статус: —");
-        Label statusLabel      = new Label("Готов к работе");
-        statusLabel.setStyle("-fx-text-fill:" + C_TEXT_TER + ";-fx-font-size:11px;-fx-font-family:'Segoe UI';");
-        statusLabel.setWrapText(true);
-        statusLabel.setMaxWidth(Double.MAX_VALUE);
+        Label statusLabel = new Label("Готов к работе");
+        statusLabel.getStyleClass().add("status-label");
 
-        // ── Disk ComboBox ────────────────────────────────────────────────────
         ComboBox<String> disksCombo = new ComboBox<>();
         disksCombo.getItems().addAll(getSystemRoots());
-        disksCombo.setMaxWidth(Double.MAX_VALUE);
-        styleCombo(disksCombo);
-
         if (!disksCombo.getItems().isEmpty()) {
             disksCombo.getSelectionModel().selectFirst();
             hddPath = disksCombo.getValue();
             hddLabel.setText(hddPath);
             refreshIndexInfo(indexSizeLabel, indexStatusLabel, hddPath);
         }
+        disksCombo.setMaxWidth(Double.MAX_VALUE);
+        styleCombo(disksCombo);
 
-        // ── Buttons ──────────────────────────────────────────────────────────
-        Button btnChooseDirectory = fluentButton("📁  Обзор",             "secondary");
-        Button btnIndex           = fluentButton("⚡  Индексировать",      "primary");
-        Button btnReindex         = fluentButton("🔄  Переиндексировать",  "secondary");
-        Button btnStop            = fluentButton("⏹  Остановить",          "danger");
-        Button btnDeleteIndex     = fluentButton("🗑  Удалить индекс",     "secondary");
-        Button btnExport          = fluentButton("📤  Экспорт файлов",     "secondary");
-        Button btnPhotoPdf        = fluentButton("📷  Фото → PDF",         "secondary");
+        Button btnChooseDirectory = fluentButton("📁", "secondary");
+        btnChooseDirectory.setTooltip(new Tooltip("Выбрать директорию"));
+        btnChooseDirectory.setPrefWidth(40);
+        Button btnIndex = fluentButton("Индексировать", "primary");
+        Button btnReindex = fluentButton("Переиндексировать", "secondary");
+        Button btnDeleteIndex = fluentButton("Удалить индекс", "danger");
+        Button btnExport = fluentButton("Экспорт файлов", "secondary");
+        Button btnPhotoPdf = fluentButton("Фото → PDF", "secondary");
 
-        // Кнопка «Стоп» доступна только во время индексации
-        btnStop.setDisable(true);
+        CheckBox chkOcr = new CheckBox("Включить OCR");
+        chkOcr.setSelected(false);
+        chkOcr.getStyleClass().add("compact-check");
 
-        // ── OCR ──────────────────────────────────────────────────────────────
-        CheckBox chkOcr = new CheckBox("OCR (Tesseract)");
-        chkOcr.setStyle("-fx-text-fill:" + C_TEXT_SEC + ";-fx-font-size:12px;-fx-font-family:'Segoe UI';");
-        chkOcr.setTooltip(new Tooltip(
-                "Включает распознавание текста на изображениях (JPG, PNG, TIFF)\n" +
-                        "и отсканированных PDF без текстового слоя.\n" +
-                        "Требует установленного Tesseract OCR."));
+        Label lblTesseract = new Label("Проверка Tesseract...");
+        lblTesseract.getStyleClass().add("meta-muted");
 
-        // Метка статуса Tesseract — проверяется один раз при старте в фоне
-        Label lblTesseract = metaLabel("Tesseract: проверка...");
         backgroundExecutor.execute(() -> {
-            boolean available = org.example.tika.TikaService.isTesseractAvailable();
+            boolean ok = org.example.tika.TikaService.isTesseractInstalled();
             Platform.runLater(() -> {
-                if (available) {
-                    lblTesseract.setText("Tesseract: ✓ найден  ·  OCR включён");
-                    lblTesseract.setStyle("-fx-text-fill:#4caf50;-fx-font-size:11px;-fx-font-family:'Segoe UI';");
+                if (ok) {
+                    String path = org.example.tika.TikaService.resolveTesseractPath();
+                    lblTesseract.setText("Tesseract: найден" + (path != null ? "  ·  " + path : ""));
                     chkOcr.setDisable(false);
-                    // Автоматически включаем OCR — пользователю ничего делать не нужно
-                    chkOcr.setSelected(true);
-                    ocrEnabled.set(true);
                 } else {
                     lblTesseract.setText("Tesseract: не установлен  ·  OCR недоступен");
-                    lblTesseract.setStyle("-fx-text-fill:" + C_TEXT_TER + ";-fx-font-size:11px;-fx-font-family:'Segoe UI';");
                     chkOcr.setDisable(true);
-                    chkOcr.setTooltip(new Tooltip(
-                            "Tesseract не найден в PATH.\n" +
-                                    "Установите: https://github.com/tesseract-ocr/tesseract\n" +
-                                    "Языки RU+EN: скачайте rus.traineddata и eng.traineddata\n" +
-                                    "в папку tessdata."));
                 }
             });
         });
-
         chkOcr.setOnAction(e -> ocrEnabled.set(chkOcr.isSelected()));
 
-        // ── Progress bar ─────────────────────────────────────────────────────
         ProgressBar pb = new ProgressBar(0);
         pb.setMaxWidth(Double.MAX_VALUE);
-        pb.setPrefHeight(4);
+        pb.setPrefHeight(3);
+        pb.setVisible(false);
+        pb.setManaged(false);
         styleProgressBar(pb);
 
-        // ── Search bar ───────────────────────────────────────────────────────
         TextField searchField = new TextField();
         searchField.setPromptText("Поиск...  (\"фраза\" для точного совпадения)");
         styleTextField(searchField);
         HBox.setHgrow(searchField, Priority.ALWAYS);
 
-        Button btnSearch = fluentButton("🔍  Найти", "accent");
-        btnSearch.setPrefWidth(110);
+        Button btnSearch = fluentButton("Найти", "accent");
+        Button btnSettings = fluentButton("⚙", "secondary");
+        btnSettings.setPrefWidth(44);
+        btnSettings.setOnAction(e -> showSettingsDialog(primaryStage));
 
-        // ── Preview ──────────────────────────────────────────────────────────
+        Label indexDot = new Label("●");
+        indexDot.getStyleClass().add("index-dot");
+
         WebView previewArea = new WebView();
+        previewArea.getStyleClass().add("preview-web");
+        Label previewTitle = new Label("Файл не выбран");
+        previewTitle.getStyleClass().add("preview-title");
+        Label previewPlaceholder = new Label("Выберите файл в таблице для предпросмотра.");
+        previewPlaceholder.getStyleClass().add("meta-muted");
+        previewArea.getEngine().loadContent("<html><body style='background:#121417;color:#9BA3AF;font-family:Segoe UI;padding:12px;'>Предпросмотр недоступен: файл не выбран.</body></html>");
 
-        // ── Event handlers ───────────────────────────────────────────────────
+        Button btnOpenFile = fluentButton("Открыть", "primary");
+        Button btnOpenFolder = fluentButton("Открыть папку", "secondary");
+        btnOpenFile.setDisable(true);
+        btnOpenFolder.setDisable(true);
+
+        final FileResult[] selectedPreview = new FileResult[1];
+        btnOpenFile.setOnAction(e -> {
+            if (selectedPreview[0] != null) {
+                openFile(selectedPreview[0].getPath());
+            }
+        });
+        btnOpenFolder.setOnAction(e -> {
+            if (selectedPreview[0] != null) {
+                openFileLocation(selectedPreview[0].getPath());
+            }
+        });
+
         disksCombo.setOnAction(e -> {
             String selected = disksCombo.getValue();
             if (selected != null) {
@@ -216,149 +221,92 @@ public class MainApp extends Application {
             }
         });
 
-        btnIndex.setOnAction(e ->
-                runIndexing(false, hddPath, btnIndex, btnReindex, btnStop, pb, statusLabel, indexSizeLabel, indexStatusLabel));
+        btnIndex.setOnAction(e -> {
+            if ("Остановить".equals(btnIndex.getText())) {
+                requestStopIndexing(btnIndex, statusLabel);
+            } else {
+                runIndexing(false, hddPath, btnIndex, btnReindex, pb, statusLabel, indexSizeLabel, indexStatusLabel);
+            }
+        });
         btnReindex.setOnAction(e ->
-                runIndexing(true, hddPath, btnIndex, btnReindex, btnStop, pb, statusLabel, indexSizeLabel, indexStatusLabel));
+                runIndexing(true, hddPath, btnIndex, btnReindex, pb, statusLabel, indexSizeLabel, indexStatusLabel));
 
-        // ── «Остановить» — устанавливает флаг отмены ────────────────────────
-        btnStop.setOnAction(e -> requestStopIndexing(btnStop, statusLabel));
-
-        // ── «Удалить индекс» — диалог выбора и удаления ─────────────────────
         btnDeleteIndex.setOnAction(e -> deleteIndexDialog(primaryStage, indexSizeLabel, indexStatusLabel, statusLabel));
-
-        btnSearch.setOnAction(e  -> performSearch(searchField.getText()));
-        btnExport.setOnAction(e  -> exportResults(primaryStage, statusLabel, pb, btnExport));
+        btnSearch.setOnAction(e -> performSearch(searchField.getText()));
+        btnExport.setOnAction(e -> exportResults(primaryStage, statusLabel, pb, btnExport));
         btnPhotoPdf.setOnAction(e -> createPdfFromPhotos(primaryStage));
 
-        setupSelectionListener(nameTable, searchField, previewArea);
-        setupSelectionListener(contentTable, searchField, previewArea);
+        setupSelectionListener(nameTable, searchField, previewArea, previewTitle, previewPlaceholder, selectedPreview, btnOpenFile, btnOpenFolder);
+        setupSelectionListener(contentTable, searchField, previewArea, previewTitle, previewPlaceholder, selectedPreview, btnOpenFile, btnOpenFolder);
 
-        // ════════════════════════════════════════════════════════════════════
-        //  LAYOUT
-        // ════════════════════════════════════════════════════════════════════
+        TabPane resultsTabs = new TabPane();
+        resultsTabs.getStyleClass().add("results-tabs");
+        Tab nameTab = new Tab("Совпадения в названии", nameTable);
+        Tab contentTab = new Tab("Совпадения в содержимом", contentTable);
+        nameTab.setClosable(false);
+        contentTab.setClosable(false);
+        resultsTabs.getTabs().addAll(nameTab, contentTab);
 
-        // ── Top bar ──────────────────────────────────────────────────────────
-        Label appTitle = new Label("HDD Search Engine");
-        appTitle.setStyle("-fx-text-fill:" + C_TEXT + ";-fx-font-size:17px;-fx-font-weight:bold;-fx-font-family:'Segoe UI';");
-
-        Region titleSpacer = new Region();
-        HBox.setHgrow(titleSpacer, Priority.ALWAYS);
-
-        HBox searchRow = new HBox(8, searchField, btnSearch);
-        searchRow.setAlignment(Pos.CENTER);
-        searchRow.setMaxWidth(560);
-        HBox.setHgrow(searchField, Priority.ALWAYS);
-
-        // ── Кнопка настроек ⚙️ — в правом углу топ-бара ─────────────────────
-        Button btnSettings = new Button("⚙");
-        btnSettings.setTooltip(new Tooltip("Настройки приложения"));
-        btnSettings.setStyle(
-                "-fx-background-color:transparent;-fx-text-fill:" + C_TEXT_SEC + ";" +
-                        "-fx-font-size:16px;-fx-cursor:hand;-fx-padding:4 8 4 8;" +
-                        "-fx-background-radius:4;");
-        btnSettings.setOnMouseEntered(e -> btnSettings.setStyle(
-                "-fx-background-color:" + C_CONTROL + ";-fx-text-fill:" + C_TEXT + ";" +
-                        "-fx-font-size:16px;-fx-cursor:hand;-fx-padding:4 8 4 8;" +
-                        "-fx-background-radius:4;"));
-        btnSettings.setOnMouseExited(e -> btnSettings.setStyle(
-                "-fx-background-color:transparent;-fx-text-fill:" + C_TEXT_SEC + ";" +
-                        "-fx-font-size:16px;-fx-cursor:hand;-fx-padding:4 8 4 8;" +
-                        "-fx-background-radius:4;"));
-        btnSettings.setOnAction(e -> showSettingsDialog(primaryStage));
-
-        HBox topBar = new HBox(16, appTitle, titleSpacer, searchRow, btnSettings);
+        HBox topBar = new HBox(8, disksCombo, btnChooseDirectory, searchField, btnSearch, btnSettings, indexDot);
+        topBar.getStyleClass().add("top-bar");
         topBar.setAlignment(Pos.CENTER_LEFT);
-        topBar.setPadding(new Insets(12, 20, 12, 20));
-        topBar.setStyle(
-                "-fx-background-color:" + C_PANEL + ";" +
-                        "-fx-effect:dropshadow(gaussian,rgba(0,0,0,0.45),10,0,0,3);"
-        );
-        HBox diskRow = new HBox(8, disksCombo, btnChooseDirectory);
-        diskRow.setAlignment(Pos.CENTER_LEFT);
-        HBox.setHgrow(disksCombo, Priority.ALWAYS);
 
-        VBox indexInfo = new VBox(4, indexStatusLabel, indexSizeLabel);
+        VBox topBox = new VBox(topBar, pb);
 
-        // Основные действия с индексом
-        VBox primaryActions  = new VBox(6, btnIndex, btnReindex);
-        // Стоп отдельно — визуально выделен
-        VBox stopAction      = new VBox(4, btnStop);
-        // Деструктивные и вспомогательные действия
-        VBox secondaryActions = new VBox(6, btnDeleteIndex, btnExport, btnPhotoPdf);
-
-        // OCR-блок
-        VBox ocrBlock = new VBox(5, chkOcr, lblTesseract);
-
-        VBox sidebar = new VBox(12,
-                sectionHeader("💾  ИСТОЧНИК"),
-                diskRow,
-                fieldLabel("Выбрано:"),
+        VBox indexPanel = new VBox(8,
+                sectionHeader("ИНДЕКС"),
                 hddLabel,
+                indexStatusLabel,
+                indexSizeLabel,
+                btnIndex,
+                btnReindex,
+                btnDeleteIndex,
                 divider(),
-                sectionHeader("📊  ИНДЕКС"),
-                indexInfo,
+                sectionHeader("ДОПОЛНИТЕЛЬНО"),
+                chkOcr,
+                lblTesseract,
+                btnExport,
+                btnPhotoPdf,
                 divider(),
-                sectionHeader("⚙️  ДЕЙСТВИЯ"),
-                primaryActions,
-                stopAction,
-                divider(),
-                sectionHeader("🔍  OCR"),
-                ocrBlock,
-                divider(),
-                secondaryActions,
-                pb,
                 statusLabel
         );
-        sidebar.setPadding(new Insets(16));
-        sidebar.setPrefWidth(272);
-        sidebar.setMinWidth(240);
-        sidebar.setStyle(
-                "-fx-background-color:" + C_SURFACE + ";" +
-                        "-fx-border-color:" + C_BORDER + ";" +
-                        "-fx-border-width:0 1 0 0;"
-        );
+        indexPanel.getStyleClass().add("left-panel");
+        indexPanel.setPrefWidth(280);
+        indexPanel.setMinWidth(240);
 
-        // ── Results pane ─────────────────────────────────────────────────────
-        VBox.setVgrow(nameTable,    Priority.ALWAYS);
-        VBox.setVgrow(contentTable, Priority.ALWAYS);
-
-        VBox resultsPane = new VBox(8,
-                sectionHeader("🔤  СОВПАДЕНИЯ В НАЗВАНИЯХ"),
-                nameTable,
-                sectionHeader("📄  СОВПАДЕНИЯ В СОДЕРЖИМОМ"),
-                contentTable
-        );
-        resultsPane.setPadding(new Insets(16));
-        resultsPane.setStyle("-fx-background-color:" + C_BG + ";");
-        VBox.setVgrow(resultsPane, Priority.ALWAYS);
-        HBox.setHgrow(resultsPane, Priority.ALWAYS);
-
-        // ── Preview pane ─────────────────────────────────────────────────────
-        VBox previewPane = new VBox(8, sectionHeader("👁  ПРЕДПРОСМОТР"), previewArea);
-        previewPane.setPadding(new Insets(16));
-        previewPane.setPrefWidth(340);
-        previewPane.setStyle(
-                "-fx-background-color:" + C_SURFACE + ";" +
-                        "-fx-border-color:" + C_BORDER + ";" +
-                        "-fx-border-width:0 0 0 1;"
-        );
+        HBox previewActions = new HBox(6, btnOpenFile, btnOpenFolder);
+        VBox previewPane = new VBox(8, previewTitle, previewActions, previewPlaceholder, previewArea);
+        previewPane.getStyleClass().add("preview-panel");
         VBox.setVgrow(previewArea, Priority.ALWAYS);
 
-        // ── Main content ─────────────────────────────────────────────────────
-        HBox mainContent = new HBox(0, sidebar, resultsPane, previewPane);
-        HBox.setHgrow(resultsPane, Priority.ALWAYS);
-        VBox.setVgrow(mainContent, Priority.ALWAYS);
+        SplitPane centerSplit = new SplitPane(resultsTabs, previewPane);
+        centerSplit.getStyleClass().add("content-split");
+        centerSplit.setDividerPositions(0.65);
 
-        VBox root = new VBox(0, topBar, mainContent);
-        VBox.setVgrow(mainContent, Priority.ALWAYS);
-        root.setStyle("-fx-background-color:" + C_BG + ";");
+        BorderPane root = new BorderPane();
+        root.setTop(topBox);
+        root.setLeft(indexPanel);
+        root.setCenter(centerSplit);
+        root.getStyleClass().add("app-root");
+
+        ChangeListener<Number> responsive = (obs, oldV, newV) -> {
+            boolean small = newV.doubleValue() < 1200;
+            previewPane.setManaged(!small);
+            previewPane.setVisible(!small);
+            if (small) {
+                centerSplit.setDividerPositions(1.0);
+            } else {
+                centerSplit.setDividerPositions(0.65);
+            }
+        };
+        primaryStage.widthProperty().addListener(responsive);
 
         Scene scene = new Scene(root, 1280, 820);
-        configureAccelerators(scene, searchField, btnSearch, btnReindex, btnStop, statusLabel, nameTable, contentTable);
+        configureAccelerators(scene, searchField, btnSearch, btnReindex, btnIndex, statusLabel, nameTable, contentTable);
         applyGlobalStyles(scene);
         primaryStage.setScene(scene);
         primaryStage.show();
+        responsive.changed(primaryStage.widthProperty(), primaryStage.getWidth(), primaryStage.getWidth());
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -667,7 +615,6 @@ public class MainApp extends Application {
                              String sourcePath,
                              Button btnIndex,
                              Button btnReindex,
-                             Button btnStop,
                              ProgressBar pb,
                              Label statusLabel,
                              Label indexSizeLabel,
@@ -693,9 +640,11 @@ public class MainApp extends Application {
         boolean finalReindex = reindex;
 
         indexingCancelled.set(false);
-        btnIndex.setDisable(true);
+        btnIndex.setText("Остановить");
+        btnIndex.setStyle(btnStyle("danger"));
         btnReindex.setDisable(true);
-        btnStop.setDisable(false);
+        pb.setVisible(true);
+        pb.setManaged(true);
         pb.setProgress(-1);
         statusLabel.setText("Подсчёт файлов...");
         indexRegistry.upsert(IndexRegistry.failedEntry(sourcePath, targetIndex));
@@ -706,7 +655,6 @@ public class MainApp extends Application {
                     deleteDirectory(targetIndex);
                 }
 
-                // Фиксируем время старта для расчёта ETA
                 final long startMs = System.currentTimeMillis();
 
                 IndexerService indexer = new IndexerService(config, targetIndex, ocrEnabled.get());
@@ -714,15 +662,12 @@ public class MainApp extends Application {
                 indexer.runIncrementalIndexing(
                         sourcePath,
                         (current, total, fileName) -> Platform.runLater(() -> {
-                            // ── Прогресс-бар ────────────────────────────────
                             if (total > 0) {
                                 pb.setProgress((double) current / total);
                             }
-
-                            // ── ETA ─────────────────────────────────────────
                             String etaStr = formatEta(startMs, current, total);
                             String progressPct = total > 0
-                                    ? String.format(" (%d%%)", (int)(100.0 * current / total))
+                                    ? String.format(" (%d%%)", (int) (100.0 * current / total))
                                     : "";
 
                             statusLabel.setText(String.format(
@@ -741,9 +686,11 @@ public class MainApp extends Application {
                 boolean usedOcr = ocrEnabled.get();
                 Platform.runLater(() -> {
                     pb.setProgress(1);
-                    btnIndex.setDisable(false);
+                    btnIndex.setText("Индексировать");
+                    btnIndex.setStyle(btnStyle("primary"));
                     btnReindex.setDisable(false);
-                    btnStop.setDisable(true);
+                    pb.setVisible(false);
+                    pb.setManaged(false);
                     String ocrTag = usedOcr ? "  ·  OCR ✓" : "";
                     statusLabel.setText("✅ Готово за " + formatDuration(totalSec) + ocrTag + " · " + sourcePath);
                     refreshIndexInfo(indexSizeLabel, indexStatusLabel, sourcePath);
@@ -753,9 +700,11 @@ public class MainApp extends Application {
                 indexRegistry.upsert(IndexRegistry.failedEntry(sourcePath, targetIndex));
                 Platform.runLater(() -> {
                     pb.setProgress(0);
-                    btnIndex.setDisable(false);
+                    btnIndex.setText("Индексировать");
+                    btnIndex.setStyle(btnStyle("primary"));
                     btnReindex.setDisable(false);
-                    btnStop.setDisable(true);
+                    pb.setVisible(false);
+                    pb.setManaged(false);
                     statusLabel.setText("⏹ Индексация остановлена: " + sourcePath);
                     refreshIndexInfo(indexSizeLabel, indexStatusLabel, sourcePath);
                 });
@@ -764,9 +713,11 @@ public class MainApp extends Application {
                 indexRegistry.upsert(IndexRegistry.failedEntry(sourcePath, targetIndex));
                 Platform.runLater(() -> {
                     pb.setProgress(0);
-                    btnIndex.setDisable(false);
+                    btnIndex.setText("Индексировать");
+                    btnIndex.setStyle(btnStyle("primary"));
                     btnReindex.setDisable(false);
-                    btnStop.setDisable(true);
+                    pb.setVisible(false);
+                    pb.setManaged(false);
                     statusLabel.setText("Ошибка индексации: " + ex.getMessage());
                     refreshIndexInfo(indexSizeLabel, indexStatusLabel, sourcePath);
                     showAlert("Ошибка", ex.getMessage());
@@ -776,6 +727,7 @@ public class MainApp extends Application {
             }
         });
     }
+
 
     /**
      * Рассчитывает и форматирует оставшееся время.
@@ -1120,113 +1072,16 @@ public class MainApp extends Application {
     }
 
     private void applyGlobalStyles(Scene scene) {
-        String css = """
-            .root { -fx-font-family: 'Segoe UI'; }
-
-            .table-view {
-                -fx-background-color: #252526;
-                -fx-border-color: #3d3d3d;
-                -fx-border-width: 1;
-                -fx-border-radius: 6;
-                -fx-background-radius: 6;
-                -fx-table-cell-border-color: transparent;
-            }
-            .table-view .filler,
-            .table-view .column-header-background {
-                -fx-background-color: #2a2a2a;
-                -fx-border-color: transparent transparent #3d3d3d transparent;
-                -fx-border-width: 0 0 1 0;
-            }
-            .table-view .column-header {
-                -fx-background-color: transparent;
-                -fx-border-color: transparent #3d3d3d transparent transparent;
-                -fx-border-width: 0 1 0 0;
-            }
-            .table-view .column-header .label {
-                -fx-text-fill: #888888;
-                -fx-font-size: 11px;
-                -fx-font-weight: bold;
-                -fx-alignment: CENTER_LEFT;
-                -fx-padding: 8 8 8 8;
-            }
-            .table-row-cell {
-                -fx-background-color: transparent;
-                -fx-border-color: transparent transparent #2d2d2d transparent;
-                -fx-border-width: 0 0 1 0;
-                -fx-cell-size: 32px;
-            }
-            .table-row-cell:odd  { -fx-background-color: rgba(255,255,255,0.02); }
-            .table-row-cell:even { -fx-background-color: transparent; }
-            .table-row-cell:hover { -fx-background-color: rgba(255,255,255,0.06); -fx-cursor: hand; }
-            .table-row-cell:selected,
-            .table-row-cell:selected:odd,
-            .table-row-cell:selected:even { -fx-background-color: #003d6b; }
-            .table-cell {
-                -fx-text-fill: #cccccc;
-                -fx-font-size: 12px;
-                -fx-padding: 0 8 0 8;
-                -fx-alignment: CENTER_LEFT;
-                -fx-border-color: transparent;
-            }
-            .table-row-cell:selected .table-cell { -fx-text-fill: #ffffff; }
-            .table-view .placeholder .label { -fx-text-fill: #555555; -fx-font-size: 13px; }
-
-            .scroll-bar { -fx-background-color: transparent; -fx-padding: 0; }
-            .scroll-bar .thumb { -fx-background-color: #4a4a4a; -fx-background-radius: 3; -fx-background-insets: 2; }
-            .scroll-bar .thumb:hover { -fx-background-color: #666666; }
-            .scroll-bar .track { -fx-background-color: transparent; }
-            .scroll-bar .increment-button, .scroll-bar .decrement-button { -fx-background-color: transparent; -fx-padding: 2; }
-            .scroll-bar .increment-arrow, .scroll-bar .decrement-arrow { -fx-background-color: #555; -fx-shape: " "; -fx-padding: 2; }
-            .scroll-pane { -fx-background-color: transparent; }
-            .scroll-pane .viewport { -fx-background-color: transparent; }
-
-            .combo-box .list-cell { -fx-text-fill: #cccccc; -fx-background-color: transparent; -fx-font-size: 12px; }
-            .combo-box-popup .list-view { -fx-background-color: #3a3a3a; -fx-border-color: #555; -fx-border-width: 1; -fx-background-radius: 4; }
-            .combo-box-popup .list-cell { -fx-text-fill: #cccccc; -fx-font-size: 12px; -fx-padding: 6 12 6 12; }
-            .combo-box-popup .list-cell:hover   { -fx-background-color: #4d4d4d; }
-            .combo-box-popup .list-cell:selected { -fx-background-color: #0078d4; -fx-text-fill: white; }
-            .combo-box .arrow-button { -fx-background-color: transparent; }
-            .combo-box .arrow        { -fx-background-color: #888; }
-
-            .progress-bar > .track { -fx-background-color: #3d3d3d; -fx-background-radius: 2; }
-            .progress-bar > .bar   { -fx-background-color: #0078d4; -fx-background-radius: 2; -fx-background-insets: 0; }
-            .progress-bar:indeterminate > .bar { -fx-background-color: linear-gradient(to right, transparent, #0078d4, transparent); }
-
-            /* Кнопка «Остановить» в задизабленном состоянии */
-            .button:disabled { -fx-opacity: 0.35; }
-
-            /* ─── CheckBox (OCR toggle) ─────────────────── */
-            .check-box .box {
-                -fx-background-color: #3d3d3d;
-                -fx-border-color: #666;
-                -fx-border-width: 1;
-                -fx-border-radius: 3;
-                -fx-background-radius: 3;
-            }
-            .check-box:selected .box {
-                -fx-background-color: #0078d4;
-                -fx-border-color: #0078d4;
-            }
-            .check-box .mark { -fx-background-color: white; }
-            .check-box:disabled { -fx-opacity: 0.4; }
-            .check-box .text  { -fx-fill: #cccccc; }
-
-            .tooltip { -fx-background-color: #3a3a3a; -fx-text-fill: #cccccc; -fx-border-color: #555; -fx-border-width: 1; -fx-background-radius: 4; -fx-font-size: 11px; }
-            .dialog-pane { -fx-background-color: #2d2d2d; }
-            .dialog-pane .content.label { -fx-text-fill: #cccccc; }
-            .dialog-pane .header-panel  { -fx-background-color: #252526; }
-            .dialog-pane .header-panel .label { -fx-text-fill: #ffffff; }
-            """;
-
-        try {
-            Path tmp = Files.createTempFile("hdd-search-", ".css");
-            Files.writeString(tmp, css);
-            tmp.toFile().deleteOnExit();
-            scene.getStylesheets().add(tmp.toUri().toString());
-        } catch (IOException ex) {
-            logger.warn("Не удалось применить глобальные стили: {}", ex.getMessage());
+        String css = getClass().getResource("/jetbrains-theme.css") != null
+                ? getClass().getResource("/jetbrains-theme.css").toExternalForm()
+                : null;
+        if (css == null) {
+            logger.warn("Не найден файл темы: /jetbrains-theme.css");
+            return;
         }
+        scene.getStylesheets().add(css);
     }
+
 
     // ════════════════════════════════════════════════════════════════════════
     //  Утилиты (без изменений)
@@ -1252,15 +1107,28 @@ public class MainApp extends Application {
     private TableView<FileResult> createTable() {
         TableView<FileResult> table = new TableView<>();
 
+        TableColumn<FileResult, String> colIcon = new TableColumn<>("");
+        colIcon.setCellValueFactory(new PropertyValueFactory<>("typeIcon"));
+        colIcon.setPrefWidth(46);
+        colIcon.setSortable(false);
+
         TableColumn<FileResult, String> colName = new TableColumn<>("Имя файла");
         colName.setCellValueFactory(new PropertyValueFactory<>("name"));
         colName.setPrefWidth(220);
 
         TableColumn<FileResult, String> colPath = new TableColumn<>("Полный путь");
         colPath.setCellValueFactory(new PropertyValueFactory<>("path"));
-        colPath.setPrefWidth(500);
+        colPath.setPrefWidth(460);
 
-        table.getColumns().addAll(colName, colPath);
+        TableColumn<FileResult, String> colSize = new TableColumn<>("Размер");
+        colSize.setCellValueFactory(new PropertyValueFactory<>("size"));
+        colSize.setPrefWidth(120);
+
+        TableColumn<FileResult, String> colModified = new TableColumn<>("Изменён");
+        colModified.setCellValueFactory(new PropertyValueFactory<>("modified"));
+        colModified.setPrefWidth(170);
+
+        table.getColumns().addAll(colIcon, colName, colPath, colSize, colModified);
 
         table.setRowFactory(tv -> {
             TableRow<FileResult> row = new TableRow<>();
@@ -1305,8 +1173,7 @@ public class MainApp extends Application {
                 copyNameItem.setDisable(!hasItem);
             });
 
-            row.emptyProperty().addListener((obs, wasEmpty, isNowEmpty) ->
-                    row.setContextMenu(isNowEmpty ? null : contextMenu));
+            row.emptyProperty().addListener((obs, wasEmpty, isNowEmpty) -> row.setContextMenu(isNowEmpty ? null : contextMenu));
 
             row.setOnContextMenuRequested(event -> {
                 if (!row.isSelected()) {
@@ -1325,11 +1192,12 @@ public class MainApp extends Application {
         return table;
     }
 
+
     private void configureAccelerators(Scene scene,
                                        TextField searchField,
                                        Button btnSearch,
                                        Button btnReindex,
-                                       Button btnStop,
+                                       Button btnIndex,
                                        Label statusLabel,
                                        TableView<FileResult> nameTable,
                                        TableView<FileResult> contentTable) {
@@ -1356,7 +1224,7 @@ public class MainApp extends Application {
         );
         scene.getAccelerators().put(
                 new KeyCodeCombination(KeyCode.ESCAPE),
-                () -> requestStopIndexing(btnStop, statusLabel)
+                () -> requestStopIndexing(btnIndex, statusLabel)
         );
     }
 
@@ -1374,21 +1242,35 @@ public class MainApp extends Application {
         return nameTable.getSelectionModel().getSelectedItem();
     }
 
-    private void requestStopIndexing(Button btnStop, Label statusLabel) {
+    private void requestStopIndexing(Button btnIndex, Label statusLabel) {
         indexingCancelled.set(true);
         IndexerService indexer = activeIndexer.get();
         if (indexer != null) {
             indexer.stop();
         }
-        btnStop.setDisable(true);
+        btnIndex.setDisable(true);
         statusLabel.setText("Остановка индексации...");
     }
 
-    private void setupSelectionListener(TableView<FileResult> table, TextField searchField, WebView preview) {
+    private void setupSelectionListener(TableView<FileResult> table,
+                                        TextField searchField,
+                                        WebView preview,
+                                        Label previewTitle,
+                                        Label previewPlaceholder,
+                                        FileResult[] selectedPreview,
+                                        Button btnOpenFile,
+                                        Button btnOpenFolder) {
         table.getSelectionModel().selectedItemProperty().addListener((obs, oldSel, newSel) -> {
             if (newSel != null) {
+                selectedPreview[0] = newSel;
+                previewTitle.setText(newSel.getName());
+                previewPlaceholder.setVisible(false);
+                previewPlaceholder.setManaged(false);
+                btnOpenFile.setDisable(false);
+                btnOpenFolder.setDisable(false);
+
                 String keyword = searchField.getText();
-                String path    = newSel.getPath();
+                String path = newSel.getPath();
 
                 new Thread(() -> {
                     String htmlSnippets;
@@ -1397,13 +1279,13 @@ public class MainApp extends Application {
                     }
                     Platform.runLater(() -> preview.getEngine().loadContent(
                             "<html><head><style>" +
-                                    "body{background:#1e1e1e;color:#cccccc;font-family:'Segoe UI',sans-serif;font-size:13px;padding:12px;margin:0;}" +
-                                    "h3{color:#0078d4;font-size:12px;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #3d3d3d;padding-bottom:6px;}" +
-                                    "b,em{color:#f0c040;font-style:normal;font-weight:bold;}" +
+                                    "body{background:#121417;color:#E6EAF0;font-family:'Segoe UI',sans-serif;font-size:13px;padding:12px;margin:0;}" +
+                                    "h3{color:#3B82F6;font-size:12px;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #2a3038;padding-bottom:6px;}" +
+                                    "b,em{color:#F59E0B;font-style:normal;font-weight:bold;}" +
                                     "p{line-height:1.6;margin:6px 0;}" +
                                     "::-webkit-scrollbar{width:6px;}" +
-                                    "::-webkit-scrollbar-track{background:#1e1e1e;}" +
-                                    "::-webkit-scrollbar-thumb{background:#4a4a4a;border-radius:3px;}" +
+                                    "::-webkit-scrollbar-track{background:#121417;}" +
+                                    "::-webkit-scrollbar-thumb{background:#334155;border-radius:3px;}" +
                                     "</style></head><body>" +
                                     "<h3>Фрагменты из файла</h3>" + htmlSnippets + "</body></html>"
                     ));
