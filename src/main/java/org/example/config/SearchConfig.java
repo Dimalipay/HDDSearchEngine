@@ -27,6 +27,8 @@ public final class SearchConfig {
     private static final String KEY_TIKA_MAX_STRING          = "tika.maxStringLength";
     private static final String KEY_TIKA_TIMEOUT_SECONDS     = "tika.timeoutSeconds";
     private static final String KEY_OCR_LANGUAGE             = "ocr.language";
+    private static final String KEY_ATTACHMENTS_PATH         = "attachments.outputPath";
+    private static final String KEY_THEME                    = "ui.theme";
 
     private static final String DEFAULT_INDEX_PATH           = "search-index";
     private static final double DEFAULT_RAM_BUFFER_MB        = 256.0;
@@ -36,6 +38,8 @@ public final class SearchConfig {
     private static final int    DEFAULT_TIKA_MAX_STRING      = 200_000;
     private static final int    DEFAULT_TIKA_TIMEOUT_SECONDS = 30;
     private static final String DEFAULT_OCR_LANGUAGE         = "rus+eng";
+    private static final String DEFAULT_ATTACHMENTS_PATH     = "";
+    private static final String DEFAULT_THEME                = "jetbrains";
 
     private final Path   indexPath;
     private final String luceneVersion;
@@ -46,6 +50,10 @@ public final class SearchConfig {
     private final int    tikaMaxStringLength;
     private final int    tikaTimeoutSeconds;
     private final String ocrLanguage;
+    /** Папка для сохранения вложений при экспорте. Пустая строка = спрашивать каждый раз. */
+    private final String attachmentsOutputPath;
+    /** Тема UI: "jetbrains" или "win11". */
+    private final String theme;
 
     private SearchConfig(Path indexPath,
                          String luceneVersion,
@@ -55,16 +63,20 @@ public final class SearchConfig {
                          DefaultOperator defaultOperator,
                          int tikaMaxStringLength,
                          int tikaTimeoutSeconds,
-                         String ocrLanguage) {
-        this.indexPath           = indexPath;
-        this.luceneVersion       = luceneVersion;
-        this.ramBufferSizeMB     = ramBufferSizeMB;
-        this.indexingThreads     = indexingThreads;
-        this.phraseSlop          = phraseSlop;
-        this.defaultOperator     = defaultOperator;
-        this.tikaMaxStringLength = tikaMaxStringLength;
-        this.tikaTimeoutSeconds  = tikaTimeoutSeconds;
-        this.ocrLanguage         = ocrLanguage;
+                         String ocrLanguage,
+                         String attachmentsOutputPath,
+                         String theme) {
+        this.indexPath              = indexPath;
+        this.luceneVersion          = luceneVersion;
+        this.ramBufferSizeMB        = ramBufferSizeMB;
+        this.indexingThreads        = indexingThreads;
+        this.phraseSlop             = phraseSlop;
+        this.defaultOperator        = defaultOperator;
+        this.tikaMaxStringLength    = tikaMaxStringLength;
+        this.tikaTimeoutSeconds     = tikaTimeoutSeconds;
+        this.ocrLanguage            = ocrLanguage;
+        this.attachmentsOutputPath  = attachmentsOutputPath != null ? attachmentsOutputPath : DEFAULT_ATTACHMENTS_PATH;
+        this.theme                  = (theme != null && !theme.isBlank()) ? theme : DEFAULT_THEME;
     }
 
     public static SearchConfig load() {
@@ -98,16 +110,19 @@ public final class SearchConfig {
         int    tikaTimeoutVal  = readInt   (properties, prefs, KEY_TIKA_TIMEOUT_SECONDS, DEFAULT_TIKA_TIMEOUT_SECONDS,   1,  3600);
         String ocrLangValue    = readValue (properties, prefs, KEY_OCR_LANGUAGE)
                 .filter(s -> !s.isBlank()).orElse(DEFAULT_OCR_LANGUAGE);
+        String attachmentsPath = readValue (properties, prefs, KEY_ATTACHMENTS_PATH).orElse(DEFAULT_ATTACHMENTS_PATH);
+        String themeValue      = readValue (properties, prefs, KEY_THEME).filter(s -> !s.isBlank()).orElse(DEFAULT_THEME);
 
         return new SearchConfig(Paths.get(indexPathValue), luceneVersionValue,
                 ramBufferValue, threadsValue, slopValue, opValue,
-                tikaMaxValue, tikaTimeoutVal, ocrLangValue);
+                tikaMaxValue, tikaTimeoutVal, ocrLangValue, attachmentsPath, themeValue);
     }
 
     public static SearchConfig forTesting(Path indexPath) {
         return new SearchConfig(indexPath, Version.LATEST.toString(),
                 DEFAULT_RAM_BUFFER_MB, 1, DEFAULT_PHRASE_SLOP, DEFAULT_OPERATOR,
-                DEFAULT_TIKA_MAX_STRING, DEFAULT_TIKA_TIMEOUT_SECONDS, DEFAULT_OCR_LANGUAGE);
+                DEFAULT_TIKA_MAX_STRING, DEFAULT_TIKA_TIMEOUT_SECONDS, DEFAULT_OCR_LANGUAGE,
+                DEFAULT_ATTACHMENTS_PATH, DEFAULT_THEME);
     }
 
     public static SearchConfig forTesting(Path indexPath,
@@ -116,7 +131,8 @@ public final class SearchConfig {
                                           int tikaMaxStringLength, int tikaTimeoutSeconds) {
         return new SearchConfig(indexPath, Version.LATEST.toString(),
                 ramBufferSizeMB, indexingThreads, phraseSlop, defaultOperator,
-                tikaMaxStringLength, tikaTimeoutSeconds, DEFAULT_OCR_LANGUAGE);
+                tikaMaxStringLength, tikaTimeoutSeconds, DEFAULT_OCR_LANGUAGE,
+                DEFAULT_ATTACHMENTS_PATH, DEFAULT_THEME);
     }
 
     // ── Getters ───────────────────────────────────────────────────────────────
@@ -130,23 +146,28 @@ public final class SearchConfig {
     public int    getTikaTimeoutSeconds()   { return tikaTimeoutSeconds; }
     /** Языковые пакеты Tesseract, разделённые '+'. Пример: {@code "rus+eng"}. */
     public String getOcrLanguage()          { return ocrLanguage; }
+    /**
+     * Папка для сохранения вложений при экспорте.
+     * Пустая строка означает «спрашивать каждый раз».
+     */
+    public String getAttachmentsOutputPath() { return attachmentsOutputPath; }
+    /** Активная тема UI: {@code "jetbrains"} или {@code "win11"}. */
+    public String getTheme()                 { return theme; }
 
     // ── Сохранение настроек ───────────────────────────────────────────────────
 
     /**
      * Сохраняет все параметры в {@link Preferences#userNodeForPackage}.
      * При следующем запуске {@link #load()} прочитает их с приоритетом над .properties.
-     *
-     * <p>Передавайте {@code null} чтобы сбросить конкретный параметр к значению
-     * из .properties (или к дефолту). Передавайте пустую строку для строковых
-     * полей не допускается — будет проигнорировано.</p>
      */
     public static void save(String indexPath,
                             double ramBufferMB,
                             int    indexingThreads,
                             int    tikaTimeoutSeconds,
                             int    tikaMaxStringLength,
-                            String ocrLanguage) {
+                            String ocrLanguage,
+                            String attachmentsOutputPath,
+                            String theme) {
         Preferences prefs = Preferences.userNodeForPackage(SearchConfig.class);
         if (indexPath != null && !indexPath.isBlank()) {
             prefs.put(KEY_INDEX_PATH, indexPath);
@@ -158,6 +179,8 @@ public final class SearchConfig {
         if (ocrLanguage != null && !ocrLanguage.isBlank()) {
             prefs.put(KEY_OCR_LANGUAGE, ocrLanguage.trim());
         }
+        prefs.put(KEY_ATTACHMENTS_PATH, attachmentsOutputPath != null ? attachmentsOutputPath.trim() : "");
+        prefs.put(KEY_THEME, theme != null && !theme.isBlank() ? theme.trim() : DEFAULT_THEME);
         try {
             prefs.flush();
             logger.info("Настройки сохранены в Preferences.");
@@ -188,6 +211,7 @@ public final class SearchConfig {
     public static int    getDefaultTikaTimeout()        { return DEFAULT_TIKA_TIMEOUT_SECONDS; }
     public static int    getDefaultTikaMaxString()      { return DEFAULT_TIKA_MAX_STRING; }
     public static String getDefaultOcrLanguage()        { return DEFAULT_OCR_LANGUAGE; }
+    public static String getDefaultTheme()              { return DEFAULT_THEME; }
 
     // ── Private helpers ───────────────────────────────────────────────────────
     private static Optional<String> readValue(Properties props, Preferences prefs, String key) {

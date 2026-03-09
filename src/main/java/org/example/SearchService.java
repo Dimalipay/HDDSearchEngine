@@ -8,6 +8,10 @@ import org.apache.lucene.index.MultiReader;
 import org.apache.lucene.queryparser.classic.MultiFieldQueryParser;
 import org.apache.lucene.queryparser.classic.QueryParser;
 import org.apache.lucene.search.*;
+import org.apache.lucene.index.Term;
+import org.apache.lucene.search.FuzzyQuery;
+import org.apache.lucene.search.BooleanClause;
+import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.highlight.*;
 import org.apache.lucene.store.FSDirectory;
 import org.example.analysis.AnalyzerProvider;
@@ -58,26 +62,69 @@ public class SearchService implements AutoCloseable {
                 true, config.getOcrLanguage());
     }
 
-    public List<FileResult> searchInFields(String keyword, String field) throws Exception {
-        List<FileResult> list = new ArrayList<>();
+    /** Размер одной страницы результатов. */
+    public static final int PAGE_SIZE = 100;
 
+    /**
+     * Результат одной страницы поиска.
+     *
+     * @param results   файлы на текущей странице
+     * @param totalHits полное число совпадений в индексе (для отображения «N из M»)
+     * @param lastDoc   последний ScoreDoc страницы — передать в следующий вызов
+     *                  {@link #searchInFieldsPaged} чтобы получить следующую страницу;
+     *                  {@code null} если страница пустая или это последняя страница
+     */
+    public record PagedResult(List<FileResult> results, long totalHits, ScoreDoc lastDoc) {
+        /** Удобный пустой результат — используется при ошибках и при отсутствии индексов. */
+        public static PagedResult empty() { return new PagedResult(List.of(), 0L, null); }
+    }
+
+    /**
+     * Постраничный поиск через {@code IndexSearcher.searchAfter()}.
+     *
+     * <p>Первый вызов: {@code afterDoc = null} — вернёт первые {@link #PAGE_SIZE} результатов.<br>
+     * Каждый следующий вызов: передать {@code PagedResult.lastDoc()} предыдущего вызова —
+     * вернёт следующую страницу без повторов и без скипования через offset.</p>
+     *
+     * @param keyword  поисковый запрос (синтаксис Lucene)
+     * @param field    {@code "filename"} или {@code "content"}
+     * @param afterDoc последний ScoreDoc предыдущей страницы, или {@code null} для первой
+     * @return страница результатов с полным счётчиком совпадений
+     */
+    public PagedResult searchInFieldsPaged(String keyword, String field,
+                                           ScoreDoc afterDoc) throws Exception {
         try (IndexReader reader = openCombinedReader()) {
-            if (reader == null) {
-                return list;
-            }
+            if (reader == null) return PagedResult.empty();
 
             IndexSearcher searcher = new IndexSearcher(reader);
-            QueryParser parser = createParser(field);
-            Query query = parser.parse(keyword);
-            TopDocs hits = searcher.search(query, 2000);
+            Query query = createParser(field).parse(keyword);
 
-            for (ScoreDoc scoreDoc : hits.scoreDocs) {
-                Document doc = searcher.storedFields().document(scoreDoc.doc);
-                String nameToShow = doc.get("display_name") != null ? doc.get("display_name") : doc.get("filename");
-                list.add(new FileResult(nameToShow, doc.get("path")));
+            // searchAfter: эффективно пропускает уже виденные результаты без offset
+            TopDocs hits = (afterDoc == null)
+                    ? searcher.search(query, PAGE_SIZE)
+                    : searcher.searchAfter(afterDoc, query, PAGE_SIZE);
+
+            long totalHits = hits.totalHits.value;
+            List<FileResult> list = new ArrayList<>(hits.scoreDocs.length);
+
+            for (ScoreDoc sd : hits.scoreDocs) {
+                Document doc = searcher.storedFields().document(sd.doc);
+                String name = doc.get("display_name") != null
+                        ? doc.get("display_name") : doc.get("filename");
+                list.add(new FileResult(name, doc.get("path")));
             }
+
+            // lastDoc = null если страница пустая или меньше PAGE_SIZE (последняя)
+            ScoreDoc lastDoc = list.isEmpty() ? null
+                    : hits.scoreDocs[hits.scoreDocs.length - 1];
+
+            return new PagedResult(list, totalHits, lastDoc);
         }
-        return list;
+    }
+
+    /** Обратная совместимость — не пагинированный вариант (для тестов и утилит). */
+    public List<FileResult> searchInFields(String keyword, String field) throws Exception {
+        return searchInFieldsPaged(keyword, field, null).results();
     }
 
     public String getHighlights(String filePath, String searchTerm) {
@@ -151,6 +198,61 @@ public class SearchService implements AutoCloseable {
     @Override
     public void close() {
         tikaService.close();
+    }
+
+
+    /**
+     * Нечёткий (fuzzy) поиск — каждое слово запроса оборачивается в
+     * {@link FuzzyQuery} с расстоянием редактирования 1 или 2
+     * (для слов длиннее 5 символов).
+     * Результаты ранжируются по сумме нечётких совпадений.
+     */
+    public PagedResult searchInFieldsPagedFuzzy(String keyword, String field,
+                                                ScoreDoc afterDoc) throws Exception {
+        try (IndexReader reader = openCombinedReader()) {
+            if (reader == null) return PagedResult.empty();
+
+            IndexSearcher searcher = new IndexSearcher(reader);
+            String[] fields = "content".equals(field) ? CONTENT_FIELDS : FILENAME_FIELDS;
+            Query query = buildFuzzyQuery(keyword, fields);
+
+            TopDocs hits = (afterDoc == null)
+                    ? searcher.search(query, PAGE_SIZE)
+                    : searcher.searchAfter(afterDoc, query, PAGE_SIZE);
+
+            long totalHits = hits.totalHits.value;
+            List<FileResult> list = new ArrayList<>(hits.scoreDocs.length);
+            for (ScoreDoc sd : hits.scoreDocs) {
+                Document doc = searcher.storedFields().document(sd.doc);
+                String name = doc.get("display_name") != null
+                        ? doc.get("display_name") : doc.get("filename");
+                list.add(new FileResult(name, doc.get("path")));
+            }
+            ScoreDoc lastDoc = list.isEmpty() ? null
+                    : hits.scoreDocs[hits.scoreDocs.length - 1];
+            return new PagedResult(list, totalHits, lastDoc);
+        }
+    }
+
+    /**
+     * Строит BooleanQuery из FuzzyQuery-термов для каждого слова запроса
+     * и каждого поля. Расстояние редактирования: 1 для слов ≤5 букв, 2 для длинных.
+     */
+    private Query buildFuzzyQuery(String keyword, String[] fields) {
+        String[] words = keyword.trim().split("\\s+");
+        BooleanQuery.Builder outer = new BooleanQuery.Builder();
+        for (String word : words) {
+            if (word.isBlank()) continue;
+            String term = word.toLowerCase().replaceAll("[^\\p{L}\\d]", "");
+            if (term.isBlank()) continue;
+            int distance = term.length() <= 5 ? 1 : 2;
+            BooleanQuery.Builder wordOr = new BooleanQuery.Builder();
+            for (String f : fields) {
+                wordOr.add(new FuzzyQuery(new Term(f, term), distance), BooleanClause.Occur.SHOULD);
+            }
+            outer.add(wordOr.build(), BooleanClause.Occur.SHOULD);
+        }
+        return outer.build();
     }
 
     private QueryParser createParser(String field) {

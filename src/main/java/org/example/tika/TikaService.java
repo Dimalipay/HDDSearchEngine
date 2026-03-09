@@ -220,13 +220,21 @@ public class TikaService implements AutoCloseable {
             Path jarLocation = Paths.get(
                     TikaService.class.getProtectionDomain()
                             .getCodeSource().getLocation().toURI());
-            Path appDir = jarLocation.getParent();
-            if (appDir != null && "app".equalsIgnoreCase(appDir.getFileName().toString())) {
-                appDir = appDir.getParent();
+            Path jarDir = jarLocation.getParent();
+            if (jarDir == null) return null;
+
+            // Сначала ищем рядом с JAR-ами (внутри app\) — именно туда кладёт jpackage
+            Path candidate = jarDir.resolve("tesseract").resolve("tesseract.exe");
+            if (Files.exists(candidate)) return candidate.getParent().toString();
+
+            // Затем ищем в корне установки (на случай --app-content)
+            if ("app".equalsIgnoreCase(jarDir.getFileName().toString())) {
+                Path installRoot = jarDir.getParent();
+                if (installRoot != null) {
+                    candidate = installRoot.resolve("tesseract").resolve("tesseract.exe");
+                    if (Files.exists(candidate)) return candidate.getParent().toString();
+                }
             }
-            if (appDir == null) return null;
-            Path bundledExe = appDir.resolve("tesseract").resolve("tesseract.exe");
-            if (Files.exists(bundledExe)) return bundledExe.getParent().toString();
         } catch (Exception e) {
             logger.debug("Не удалось определить путь к приложению: {}", e.getMessage());
         }
