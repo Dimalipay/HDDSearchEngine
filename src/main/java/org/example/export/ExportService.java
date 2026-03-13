@@ -9,6 +9,7 @@ import org.apache.tika.parser.Parser;
 import org.example.tika.TikaService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.example.util.PathUtils;
 import org.xml.sax.SAXException;
 import org.xml.sax.helpers.DefaultHandler;
 
@@ -250,7 +251,7 @@ public class ExportService {
                 if (safeName.isBlank())
                     safeName = "attachment_" + (count.get() + 1);
 
-                safeName = uniqueName(usedNames, safeName);
+                safeName = PathUtils.uniqueName(usedNames, safeName);
                 usedNames.add(safeName);
 
                 byte[] bytes = stream.readAllBytes();
@@ -290,18 +291,6 @@ public class ExportService {
     }
 
     // ── Утилиты ───────────────────────────────────────────────────────────────
-
-    private String uniqueName(Set<String> used, String name) {
-        if (!used.contains(name)) return name;
-        int dot = name.lastIndexOf('.');
-        String base = dot > 0 ? name.substring(0, dot) : name;
-        String ext  = dot > 0 ? name.substring(dot)    : "";
-        int i = 1;
-        String candidate;
-        do { candidate = base + "_(" + i++ + ")" + ext; }
-        while (used.contains(candidate));
-        return candidate;
-    }
 
     private Set<Path> sanitize(List<Path> inputFiles) {
         Set<Path> normalized = new LinkedHashSet<>();
