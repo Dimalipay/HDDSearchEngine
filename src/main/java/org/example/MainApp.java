@@ -8,6 +8,7 @@ import javafx.beans.value.ChangeListener;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
+import javafx.scene.image.Image;
 import javafx.scene.control.*;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.cell.PropertyValueFactory;
@@ -22,10 +23,12 @@ import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyCodeCombination;
 import javafx.scene.input.KeyCombination;
+import javafx.scene.image.Image;
 import javafx.stage.Modality;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
+import javafx.stage.Popup;
 import org.example.photo.PhotoPdfResult;
 import org.example.photo.PhotoPdfService;
 import org.example.config.SearchConfig;
@@ -71,6 +74,36 @@ public class MainApp extends Application {
     /** Ссылка на активный индексатор для корректной остановки по Esc/кнопке. */
     private final AtomicReference<IndexerService> activeIndexer = new AtomicReference<>();
 
+    // ─── Пагинация результатов ────────────────────────────────────────────────
+    /** ScoreDoc последней загруженной страницы «Совпадения в названии» для searchAfter. */
+    private final AtomicReference<org.apache.lucene.search.ScoreDoc> lastNameDoc     = new AtomicReference<>(null);
+    /** ScoreDoc последней загруженной страницы «Совпадения в содержимом». */
+    private final AtomicReference<org.apache.lucene.search.ScoreDoc> lastContentDoc  = new AtomicReference<>(null);
+    /** Полное число совпадений в названии (для подписи вкладки «N из M»). */
+    private final AtomicReference<Long> totalNameHits    = new AtomicReference<>(0L);
+    /** Полное число совпадений в содержимом. */
+    private final AtomicReference<Long> totalContentHits = new AtomicReference<>(0L);
+
+    // ─── Предпросмотр ─────────────────────────────────────────────────────────
+    /**
+     * Активный Future предпросмотра. Перед запуском нового — отменяем старый,
+     * чтобы не плодить потоки и не показывать предпросмотр «не того» файла.
+     */
+    private final AtomicReference<java.util.concurrent.Future<?>> previewFuture = new AtomicReference<>(null);
+
+    // ─── File Watcher ─────────────────────────────────────────────────────────
+    /** Активный File Watcher для текущего hddPath. */
+    private final AtomicReference<FileWatcherService> activeWatcher = new AtomicReference<>();
+    /** Метка статуса индекса в сайдбаре: 🟢 / 🟡 */
+    private Label lblWatcherStatus;
+
+    // ─── UI-компоненты пагинации (инициализируются в start()) ────────────────
+    private Label  lblNameCount;
+    private Label  lblContentCount;
+    private Button btnLoadMoreName;
+    private Button btnLoadMoreContent;
+
+
     // ─── Fluent Design colour tokens ────────────────────────────────────────
     private static final String C_BG          = "#121417";
     private static final String C_SURFACE      = "#1E2329";
@@ -89,6 +122,7 @@ public class MainApp extends Application {
     @Override
     public void start(Stage primaryStage) {
         logger.info("Запуск приложения. Lucene: {}", config.getLuceneVersion());
+        currentTheme = config.getTheme();
 
         String bundledTesseract = org.example.tika.TikaService.resolveTesseractPath();
         if (bundledTesseract != null) {
@@ -304,6 +338,23 @@ public class MainApp extends Application {
         Scene scene = new Scene(root, 1280, 820);
         configureAccelerators(scene, searchField, btnSearch, btnReindex, btnIndex, statusLabel, nameTable, contentTable);
         applyGlobalStyles(scene);
+        // ── Иконка приложения ─────────────────────────────────────────────────────
+        try {
+            java.io.InputStream iconStream = getClass().getResourceAsStream("/icon.ico");
+            if (iconStream == null) {
+                logger.warn("Иконка не найдена в ресурсах: /icon.ico");
+            } else {
+                Image appIcon = new Image(iconStream);
+                if (appIcon.isError()) {
+                    logger.warn("Иконка загружена с ошибкой: {}", appIcon.getException().getMessage());
+                } else {
+                    primaryStage.getIcons().add(appIcon);
+                    logger.info("Иконка приложения установлена.");
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("Ошибка загрузки иконки: {}", e.getMessage());
+        }
         primaryStage.setScene(scene);
         primaryStage.show();
         responsive.changed(primaryStage.widthProperty(), primaryStage.getWidth(), primaryStage.getWidth());
@@ -327,15 +378,29 @@ public class MainApp extends Application {
         dialog.setTitle("Настройки");
         dialog.setResizable(false);
 
-        String fieldStyle =
-                "-fx-background-color:#3d3d3d;-fx-text-fill:#ffffff;" +
-                        "-fx-border-color:#555;-fx-border-width:1;-fx-border-radius:4;" +
-                        "-fx-background-radius:4;-fx-padding:6 10 6 10;" +
-                        "-fx-font-size:12px;-fx-font-family:'Segoe UI';";
-        String labelStyle =
-                "-fx-text-fill:#cccccc;-fx-font-size:12px;-fx-font-family:'Segoe UI';";
-        String hintStyle =
-                "-fx-text-fill:#666666;-fx-font-size:10px;-fx-font-family:'Segoe UI';";
+        boolean isLight = "win11".equalsIgnoreCase(currentTheme);
+        String dlgBg    = isLight ? "#F3F3F3"  : "#2d2d2d";
+        String fieldStyle = isLight
+                ? "-fx-background-color:#FFFFFF;-fx-text-fill:#1A1A1A;"
+                + "-fx-border-color:#CACACA;-fx-border-width:1;-fx-border-radius:4;"
+                + "-fx-background-radius:4;-fx-padding:6 10 6 10;"
+                + "-fx-font-size:12px;-fx-font-family:'Segoe UI';"
+                : "-fx-background-color:#3d3d3d;-fx-text-fill:#ffffff;"
+                + "-fx-border-color:#555;-fx-border-width:1;-fx-border-radius:4;"
+                + "-fx-background-radius:4;-fx-padding:6 10 6 10;"
+                + "-fx-font-size:12px;-fx-font-family:'Segoe UI';";
+        String labelStyle = isLight
+                ? "-fx-text-fill:#1A1A1A;-fx-font-size:12px;-fx-font-family:'Segoe UI';"
+                : "-fx-text-fill:#cccccc;-fx-font-size:12px;-fx-font-family:'Segoe UI';";
+        String hintStyle = isLight
+                ? "-fx-text-fill:#5A5A5A;-fx-font-size:10px;-fx-font-family:'Segoe UI';"
+                : "-fx-text-fill:#666666;-fx-font-size:10px;-fx-font-family:'Segoe UI';";
+        String dlgBtnStyle = "-fx-background-color:" + (isLight ? "#FDFDFD" : "#3d3d3d") + ";"
+                + "-fx-text-fill:" + (isLight ? "#1A1A1A" : "#cccccc") + ";"
+                + "-fx-border-color:" + (isLight ? "#D1D1D1" : "#555") + ";"
+                + "-fx-border-width:1;-fx-border-radius:4;-fx-background-radius:4;"
+                + "-fx-cursor:hand;-fx-padding:6 10 6 10;";
+
 
         // ── Папка индексов ────────────────────────────────────────────────────
         Label lblIndexPath = new Label("Папка индексов");
@@ -344,10 +409,7 @@ public class MainApp extends Application {
         tfIndexPath.setStyle(fieldStyle);
         tfIndexPath.setPrefWidth(340);
         Button btnBrowse = new Button("📁");
-        btnBrowse.setStyle(
-                "-fx-background-color:#3d3d3d;-fx-text-fill:#cccccc;" +
-                        "-fx-border-color:#555;-fx-border-width:1;-fx-border-radius:4;" +
-                        "-fx-background-radius:4;-fx-cursor:hand;-fx-padding:6 10 6 10;");
+        btnBrowse.setStyle(dlgBtnStyle);
         btnBrowse.setOnAction(e -> {
             DirectoryChooser dc = new DirectoryChooser();
             dc.setTitle("Выберите папку для индексов");
@@ -423,6 +485,74 @@ public class MainApp extends Application {
         hintOcr.setStyle(hintStyle);
         hintOcr.setWrapText(true);
 
+        // ── Тема интерфейса ───────────────────────────────────────────────────
+        Label lblTheme = new Label("Тема интерфейса");
+        lblTheme.setStyle(labelStyle);
+
+        ToggleGroup themeGroup = new ToggleGroup();
+        RadioButton rbJetBrains = new RadioButton("JetBrains Dark");
+        RadioButton rbWin11     = new RadioButton("Windows 11");
+        rbJetBrains.setToggleGroup(themeGroup);
+        rbWin11.setToggleGroup(themeGroup);
+        String themeRadioStyle = isLight
+                ? "-fx-text-fill:#1A1A1A;-fx-font-size:12px;-fx-font-family:'Segoe UI';"
+                : "-fx-text-fill:#cccccc;-fx-font-size:12px;-fx-font-family:'Segoe UI';";
+        rbJetBrains.setStyle(themeRadioStyle);
+        rbWin11.setStyle(themeRadioStyle);
+        if ("win11".equalsIgnoreCase(currentTheme)) rbWin11.setSelected(true);
+        else rbJetBrains.setSelected(true);
+
+        // Preview label
+        Label lblThemePreview = new Label();
+        lblThemePreview.setStyle("-fx-font-size:11px;-fx-font-family:'Segoe UI';-fx-font-style:italic;");
+        Runnable updatePreview = () -> {
+            if (rbWin11.isSelected())
+                lblThemePreview.setText("Fluent Design · синий акцент #0078D4 · скруглённые элементы");
+            else
+                lblThemePreview.setText("Тёмная тема · синий акцент #3B82F6 · JetBrains стиль");
+            lblThemePreview.setStyle("-fx-text-fill:#888;-fx-font-size:11px;-fx-font-family:'Segoe UI';-fx-font-style:italic;");
+        };
+        updatePreview.run();
+        rbJetBrains.setOnAction(e -> updatePreview.run());
+        rbWin11.setOnAction(e -> updatePreview.run());
+
+        HBox themeRow = new HBox(16, rbJetBrains, rbWin11);
+        themeRow.setAlignment(javafx.geometry.Pos.CENTER_LEFT);
+        Label hintTheme = new Label("Применяется мгновенно без перезапуска.");
+        hintTheme.setStyle(hintStyle);
+
+        // ── Папка для вложений ────────────────────────────────────────────────
+        Label lblAttsPath = new Label("Папка для вложений");
+        lblAttsPath.setStyle(labelStyle);
+        TextField tfAttsPath = new TextField(config.getAttachmentsOutputPath());
+        tfAttsPath.setStyle(fieldStyle);
+        tfAttsPath.setPromptText("Пусто — спрашивать при каждом экспорте");
+        tfAttsPath.setPrefWidth(340);
+        Button btnBrowseAtts = new Button("📁");
+        btnBrowseAtts.setStyle(dlgBtnStyle);
+        btnBrowseAtts.setOnAction(e -> {
+            DirectoryChooser dc = new DirectoryChooser();
+            dc.setTitle("Выберите папку для сохранения вложений");
+            String cur = tfAttsPath.getText().trim();
+            if (!cur.isBlank()) {
+                try { dc.setInitialDirectory(new File(cur)); } catch (Exception ignored) {}
+            }
+            File chosen = dc.showDialog(dialog);
+            if (chosen != null) tfAttsPath.setText(chosen.getAbsolutePath());
+        });
+        Button btnClearAtts = new Button("✕");
+        btnClearAtts.setStyle(dlgBtnStyle);
+        btnClearAtts.setTooltip(new Tooltip("Сбросить (спрашивать каждый раз)"));
+        btnClearAtts.setOnAction(e -> tfAttsPath.setText(""));
+        HBox attsPathRow = new HBox(6, tfAttsPath, btnBrowseAtts, btnClearAtts);
+        attsPathRow.setAlignment(Pos.CENTER_LEFT);
+        HBox.setHgrow(tfAttsPath, Priority.ALWAYS);
+        Label hintAttsPath = new Label(
+                "Папка по умолчанию для сохранения вложений из писем. " +
+                        "Если не задана — директория будет выбираться каждый раз при экспорте.");
+        hintAttsPath.setStyle(hintStyle);
+        hintAttsPath.setWrapText(true);
+
         // ── Сборка формы ──────────────────────────────────────────────────────
         VBox form = new VBox(10,
                 lblIndexPath, indexPathRow, hintIndexPath,
@@ -435,7 +565,11 @@ public class MainApp extends Application {
                 separator(),
                 lblMaxStr,   spMaxStr,    hintMaxStr,
                 separator(),
-                lblOcr,      tfOcr,       hintOcr
+                lblOcr,      tfOcr,       hintOcr,
+                separator(),
+                lblTheme, themeRow, lblThemePreview, hintTheme,
+                separator(),
+                lblAttsPath, attsPathRow, hintAttsPath
         );
         form.setPadding(new Insets(20, 24, 8, 24));
 
@@ -449,8 +583,8 @@ public class MainApp extends Application {
         btnCancel.setPrefWidth(100);
 
         // Подсказка «вступит в силу после перезапуска»
-        Label lblRestartNote = new Label("⚠  Изменения вступят в силу после перезапуска приложения.");
-        lblRestartNote.setStyle("-fx-text-fill:#f0c040;-fx-font-size:11px;-fx-font-family:'Segoe UI';");
+        Label lblRestartNote = new Label("⚠  Большинство изменений вступят в силу после перезапуска. Тема применяется мгновенно.");
+        lblRestartNote.setStyle("-fx-text-fill:" + (isLight ? "#9E5A00" : "#f0c040") + ";-fx-font-size:11px;-fx-font-family:'Segoe UI';");
         lblRestartNote.setVisible(false);
 
         btnSave.setOnAction(e -> {
@@ -471,13 +605,25 @@ public class MainApp extends Application {
             spTimeout.commitValue();
             spMaxStr.commitValue();
 
+            String chosenTheme = rbWin11.isSelected() ? "win11" : "jetbrains";
+            // Применяем тему немедленно, без перезапуска
+            currentTheme = chosenTheme;
+            if (mainScene != null) {
+                applyTheme(mainScene, chosenTheme);
+                // Обновляем и стили самого диалога настроек
+                dialog.getScene().getStylesheets().clear();
+                dialog.getScene().getStylesheets().addAll(mainScene.getStylesheets());
+            }
+
             SearchConfig.save(
                     indexPathVal,
                     spRam.getValue().doubleValue(),
                     spThreads.getValue(),
                     spTimeout.getValue(),
                     spMaxStr.getValue(),
-                    ocrLang
+                    ocrLang,
+                    tfAttsPath.getText().trim(),
+                    chosenTheme
             );
 
             lblRestartNote.setVisible(true);
@@ -500,6 +646,10 @@ public class MainApp extends Application {
                     spTimeout.getValueFactory().setValue(SearchConfig.getDefaultTikaTimeout());
                     spMaxStr.getValueFactory().setValue(SearchConfig.getDefaultTikaMaxString());
                     tfOcr.setText(SearchConfig.getDefaultOcrLanguage());
+                    tfAttsPath.setText("");
+                    rbJetBrains.setSelected(true);
+                    rbWin11.setSelected(false);
+                    updatePreview.run();
                     lblRestartNote.setVisible(true);
                     btnSave.setDisable(false);
                 }
@@ -516,9 +666,9 @@ public class MainApp extends Application {
 
         VBox root = new VBox(0, form, lblRestartNote, buttonsRow);
         VBox.setMargin(lblRestartNote, new Insets(8, 24, 0, 24));
-        root.setStyle("-fx-background-color:#2d2d2d;");
+        root.setStyle("-fx-background-color:" + dlgBg + ";");
 
-        dialog.setScene(new Scene(root, 500, 620));
+        dialog.setScene(new Scene(root, 500, 720));
         dialog.getScene().getStylesheets().addAll(owner.getScene().getStylesheets());
         dialog.show();
     }
@@ -528,7 +678,7 @@ public class MainApp extends Application {
         Region line = new Region();
         line.setPrefHeight(1);
         line.setMaxWidth(Double.MAX_VALUE);
-        line.setStyle("-fx-background-color:#3a3a3a;");
+        line.setStyle("-fx-background-color:" + ("win11".equalsIgnoreCase(currentTheme) ? "#E0E0E0" : "#3a3a3a") + ";");
         VBox.setMargin(line, new Insets(2, 0, 2, 0));
         return line;
     }
@@ -694,6 +844,7 @@ public class MainApp extends Application {
                     String ocrTag = usedOcr ? "  ·  OCR ✓" : "";
                     statusLabel.setText("✅ Готово за " + formatDuration(totalSec) + ocrTag + " · " + sourcePath);
                     refreshIndexInfo(indexSizeLabel, indexStatusLabel, sourcePath);
+                    startFileWatcher(sourcePath, statusLabel);
                 });
 
             } catch (CancellationException cancelled) {
@@ -765,8 +916,19 @@ public class MainApp extends Application {
 
     private void performSearch(String query) {
         if (query == null || query.trim().isEmpty()) return;
+        searchHistory.add(query);
+
+        // Сбрасываем результаты и состояние пагинации
         nameResults.clear();
         contentResults.clear();
+        lastNameDoc.set(null);
+        lastContentDoc.set(null);
+        totalNameHits.set(0L);
+        totalContentHits.set(0L);
+        if (lblNameCount    != null) lblNameCount.setText("");
+        if (lblContentCount != null) lblContentCount.setText("");
+        if (btnLoadMoreName    != null) btnLoadMoreName.setVisible(false);
+        if (btnLoadMoreContent != null) btnLoadMoreContent.setVisible(false);
 
         List<Path> indexPaths = indexRegistry.allReadyIndexPaths();
         if (indexPaths.isEmpty()) {
@@ -776,11 +938,23 @@ public class MainApp extends Application {
 
         backgroundExecutor.execute(() -> {
             try (SearchService searcher = new SearchService(config, indexPaths)) {
-                var nameHits    = searcher.searchInFields(query, "filename");
-                var contentHits = searcher.searchInFields(query, "content");
+                var namePage    = searcher.searchInFieldsPaged(query, "filename", null);
+                var contentPage = searcher.searchInFieldsPaged(query, "content",  null);
+
                 Platform.runLater(() -> {
-                    nameResults.addAll(nameHits);
-                    contentResults.addAll(contentHits);
+                    // Название: первая страница
+                    nameResults.addAll(namePage.results());
+                    lastNameDoc.set(namePage.lastDoc());
+                    totalNameHits.set(namePage.totalHits());
+                    updatePageCounter(lblNameCount, btnLoadMoreName,
+                            nameResults.size(), namePage.totalHits());
+
+                    // Содержимое: первая страница
+                    contentResults.addAll(contentPage.results());
+                    lastContentDoc.set(contentPage.lastDoc());
+                    totalContentHits.set(contentPage.totalHits());
+                    updatePageCounter(lblContentCount, btnLoadMoreContent,
+                            contentResults.size(), contentPage.totalHits());
                 });
             } catch (Exception ex) {
                 Platform.runLater(() -> showAlert("Ошибка поиска", ex.getMessage()));
@@ -1202,11 +1376,16 @@ public class MainApp extends Application {
                 String keyword = searchField.getText();
                 String path = newSel.getPath();
 
-                new Thread(() -> {
                     String htmlSnippets;
                     try (SearchService svc = new SearchService(config, indexRegistry.allReadyIndexPaths())) {
                         htmlSnippets = svc.getHighlights(path, keyword);
+                    } catch (Exception e) {
+                        htmlSnippets = "Ошибка предпросмотра: " + e.getMessage();
                     }
+
+                    if (Thread.currentThread().isInterrupted()) return;
+
+                    final String finalHtml = htmlSnippets;
                     Platform.runLater(() -> preview.getEngine().loadContent(
                             "<html><head><style>" +
                                     "body{background:#121417;color:#E6EAF0;font-family:'Segoe UI',sans-serif;font-size:13px;padding:12px;margin:0;}" +
@@ -1217,9 +1396,10 @@ public class MainApp extends Application {
                                     "::-webkit-scrollbar-track{background:#121417;}" +
                                     "::-webkit-scrollbar-thumb{background:#334155;border-radius:3px;}" +
                                     "</style></head><body>" +
-                                    "<h3>Фрагменты из файла</h3>" + htmlSnippets + "</body></html>"
+                                    "<h3>Фрагменты из файла</h3>" + finalHtml + "</body></html>"
                     ));
-                }).start();
+                });
+                previewFuture.set(future);
             }
         });
     }
@@ -1301,6 +1481,10 @@ public class MainApp extends Application {
     public void stop() {
         indexingCancelled.set(true);
         backgroundExecutor.shutdownNow();
+        FileWatcherService watcher = activeWatcher.getAndSet(null);
+        if (watcher != null) {
+            try { watcher.close(); } catch (Exception ignored) {}
+        }
     }
 
     public static void main(String[] args) {

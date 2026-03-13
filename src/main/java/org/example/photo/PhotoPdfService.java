@@ -18,7 +18,6 @@ import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
@@ -27,11 +26,11 @@ import java.util.function.BooleanSupplier;
 public class PhotoPdfService {
     private static final Logger logger = LoggerFactory.getLogger(PhotoPdfService.class);
 
-    private static final int PAGE_WIDTH_PX = 2480;
+    private static final int PAGE_WIDTH_PX  = 2480;
     private static final int PAGE_HEIGHT_PX = 3508;
-    private static final int MARGIN_PX = 50;
-    private static final int GRID = 2;
-    private static final int GAP_PX = 50;
+    private static final int MARGIN_PX      = 50;
+    private static final int GRID           = 2;
+    private static final int GAP_PX         = 50;
 
     public PhotoPdfResult generatePdfFromFolder(Path folder, Path outputPdf) throws IOException {
         return generatePdfFromFolder(folder, outputPdf, null, () -> false);
@@ -50,61 +49,104 @@ public class PhotoPdfService {
             throw new IllegalArgumentException("В выбранной папке нет поддерживаемых изображений");
         }
 
-        List<BufferedImage> pages = new ArrayList<>();
-        int totalImages = imageFiles.size();
+        int totalImages  = imageFiles.size();
         int processedImages = 0;
+        int pageCount    = 0;
+        // Estimated total pages (used only for progress display)
+        int estimatedPages = (totalImages + GRID * GRID - 1) / (GRID * GRID);
 
-        BufferedImage currentPage = createBlankPage();
-        Graphics2D g = currentPage.createGraphics();
-        initGraphics(g);
+        if (outputPdf.getParent() != null) {
+            Files.createDirectories(outputPdf.getParent());
+        }
 
-        int slot = 0;
-        for (Path imagePath : imageFiles) {
-            if (cancellation.getAsBoolean()) {
-                g.dispose();
-                throw new IOException("Операция отменена пользователем");
-            }
+        // ── FIX: open PDF document once and write each page immediately ──────
+        // Previously all BufferedImages were collected in a List<BufferedImage>
+        // before writing — for 1526 photos that required ~10 GB of RAM and caused
+        // the application to freeze around photo 217-221 (JVM heap exhaustion).
+        // Now each composed page is flushed into the PDF document right away and
+        // the BufferedImage reference is released so GC can reclaim the memory.
+        // ─────────────────────────────────────────────────────────────────────
+        try (PDDocument document = new PDDocument()) {
 
-            processedImages++;
-            notifyProgress(progressListener, "Сортировка изображений…", processedImages, totalImages);
+            BufferedImage currentPage = createBlankPage();
+            Graphics2D g = currentPage.createGraphics();
+            initGraphics(g);
+            int slot = 0;
 
-            try {
-                BufferedImage image = loadAndPrepareImage(imagePath);
-                if (image == null) {
-                    logger.warn("Изображение повреждено или не поддерживается: {}", imagePath);
-                    continue;
-                }
-
-                placeOnPage(g, image, slot);
-                slot++;
-
-                if (slot == GRID * GRID) {
-                    pages.add(currentPage);
+            for (Path imagePath : imageFiles) {
+                if (cancellation.getAsBoolean()) {
                     g.dispose();
-                    currentPage = createBlankPage();
-                    g = currentPage.createGraphics();
-                    initGraphics(g);
-                    slot = 0;
+                    throw new IOException("Операция отменена пользователем");
                 }
-            } catch (Exception e) {
-                logger.warn("Ошибка обработки изображения {}: {}", imagePath, e.getMessage());
+
+                processedImages++;
+                notifyProgress(progressListener,
+                        "Обработка изображения…", processedImages, totalImages);
+
+                try {
+                    BufferedImage image = loadAndPrepareImage(imagePath);
+                    if (image == null) {
+                        logger.warn("Изображение повреждено или не поддерживается: {}", imagePath);
+                        continue;
+                    }
+
+                    placeOnPage(g, image, slot);
+                    image.flush(); // release pixel data ASAP
+                    slot++;
+
+                    if (slot == GRID * GRID) {
+                        g.dispose();
+                        pageCount++;
+                        notifyProgress(progressListener,
+                                "Сохранение страницы…", pageCount, estimatedPages);
+
+                        // Write page to PDF and free memory immediately
+                        flushPageToDocument(document, currentPage);
+                        currentPage = null; // help GC
+
+                        currentPage = createBlankPage();
+                        g = currentPage.createGraphics();
+                        initGraphics(g);
+                        slot = 0;
+                    }
+                } catch (Exception e) {
+                    logger.warn("Ошибка обработки изображения {}: {}", imagePath, e.getMessage());
+                }
             }
+
+            // Flush the last (possibly partial) page
+            g.dispose();
+            if (slot > 0) {
+                pageCount++;
+                notifyProgress(progressListener,
+                        "Сохранение последней страницы…", pageCount, estimatedPages);
+                flushPageToDocument(document, currentPage);
+            }
+
+            if (pageCount == 0) {
+                throw new IOException("Не удалось подготовить ни одной страницы PDF");
+            }
+
+            notifyProgress(progressListener, "Запись файла на диск…", pageCount, pageCount);
+            document.save(outputPdf.toFile());
         }
 
-        g.dispose();
-        if (slot > 0) {
-            pages.add(currentPage);
-        }
-
-        if (pages.isEmpty()) {
-            throw new IOException("Не удалось подготовить ни одной страницы PDF");
-        }
-
-        notifyProgress(progressListener, "Сохранение PDF…", 0, pages.size());
-        exportPdf(outputPdf, pages, progressListener, cancellation);
-
-        return new PhotoPdfResult(totalImages, pages.size(), outputPdf);
+        return new PhotoPdfResult(totalImages, pageCount, outputPdf);
     }
+
+    // ── Write one composed page into the open PDDocument, then flush it ──────
+    private void flushPageToDocument(PDDocument document, BufferedImage pageImage) throws IOException {
+        PDPage page = new PDPage(PDRectangle.A4);
+        document.addPage(page);
+
+        var pdImage = LosslessFactory.createFromImage(document, pageImage);
+        try (PDPageContentStream cs = new PDPageContentStream(document, page)) {
+            cs.drawImage(pdImage, 0, 0, PDRectangle.A4.getWidth(), PDRectangle.A4.getHeight());
+        }
+        pageImage.flush(); // release uncompressed pixel data after embedding
+    }
+
+    // ── Helpers (unchanged) ───────────────────────────────────────────────────
 
     private List<Path> loadImages(Path folder) throws IOException {
         try (var stream = Files.list(folder)) {
@@ -118,7 +160,8 @@ public class PhotoPdfService {
 
     private boolean isImage(Path path) {
         String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
-        return name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png") || name.endsWith(".bmp");
+        return name.endsWith(".jpg") || name.endsWith(".jpeg")
+                || name.endsWith(".png") || name.endsWith(".bmp");
     }
 
     private BufferedImage loadAndPrepareImage(Path imagePath) throws Exception {
@@ -157,48 +200,21 @@ public class PhotoPdfService {
         int col = slot % GRID;
         int row = slot / GRID;
 
-        int cellWidth = (PAGE_WIDTH_PX - MARGIN_PX * 2 - GAP_PX) / GRID;
+        int cellWidth  = (PAGE_WIDTH_PX  - MARGIN_PX * 2 - GAP_PX) / GRID;
         int cellHeight = (PAGE_HEIGHT_PX - MARGIN_PX * 2 - GAP_PX) / GRID;
 
-        int cellX = MARGIN_PX + col * (cellWidth + GAP_PX);
+        int cellX = MARGIN_PX + col * (cellWidth  + GAP_PX);
         int cellY = MARGIN_PX + row * (cellHeight + GAP_PX);
 
-        double ratio = Math.min((double) cellWidth / image.getWidth(), (double) cellHeight / image.getHeight());
-        int drawW = Math.max(1, (int) Math.round(image.getWidth() * ratio));
+        double ratio = Math.min((double) cellWidth  / image.getWidth(),
+                (double) cellHeight / image.getHeight());
+        int drawW = Math.max(1, (int) Math.round(image.getWidth()  * ratio));
         int drawH = Math.max(1, (int) Math.round(image.getHeight() * ratio));
 
-        int x = cellX + (cellWidth - drawW) / 2;
+        int x = cellX + (cellWidth  - drawW) / 2;
         int y = cellY + (cellHeight - drawH) / 2;
 
         g.drawImage(image, x, y, drawW, drawH, null);
-    }
-
-    private void exportPdf(Path outputPdf,
-                           List<BufferedImage> pages,
-                           ProgressListener progressListener,
-                           BooleanSupplier cancellation) throws IOException {
-        if (outputPdf.getParent() != null) {
-            Files.createDirectories(outputPdf.getParent());
-        }
-
-        try (PDDocument document = new PDDocument()) {
-            for (int i = 0; i < pages.size(); i++) {
-                if (cancellation.getAsBoolean()) {
-                    throw new IOException("Операция отменена пользователем");
-                }
-
-                notifyProgress(progressListener, "Сохранение PDF…", i + 1, pages.size());
-                PDPage page = new PDPage(PDRectangle.A4);
-                document.addPage(page);
-
-                var pdImage = LosslessFactory.createFromImage(document, pages.get(i));
-                try (PDPageContentStream contentStream = new PDPageContentStream(document, page)) {
-                    contentStream.drawImage(pdImage, 0, 0, PDRectangle.A4.getWidth(), PDRectangle.A4.getHeight());
-                }
-            }
-
-            document.save(outputPdf.toFile());
-        }
     }
 
     private BufferedImage createBlankPage() {
@@ -211,9 +227,9 @@ public class PhotoPdfService {
     }
 
     private void initGraphics(Graphics2D g) {
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING,   RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION,  RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        g.setRenderingHint(RenderingHints.KEY_RENDERING,      RenderingHints.VALUE_RENDER_QUALITY);
     }
 
     private BufferedImage rotate90(BufferedImage src) {
