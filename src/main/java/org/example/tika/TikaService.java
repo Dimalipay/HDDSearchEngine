@@ -15,6 +15,7 @@ import org.apache.tika.sax.ContentHandlerFactory;
 import org.apache.tika.sax.RecursiveParserWrapperHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.example.util.PathUtils;
 import org.xml.sax.ContentHandler;
 import org.xml.sax.SAXException;
 import org.xml.sax.helpers.DefaultHandler;
@@ -139,7 +140,7 @@ public class TikaService implements AutoCloseable {
                 if (safeName.isBlank()) safeName = "attachment_" + (count.get() + 1);
 
                 // Уникальное имя в рамках этой папки
-                safeName = uniqueName(usedNames, safeName);
+                safeName = PathUtils.uniqueName(usedNames, safeName);
                 usedNames.add(safeName);
 
                 // Читаем весь поток: InputStream однопроходный, нельзя передавать дальше
@@ -366,17 +367,6 @@ public class TikaService implements AutoCloseable {
     // ── Утилиты ───────────────────────────────────────────────────────────────
 
     /** Уникальное имя: если {@code name} уже в {@code used} — добавляет суффикс _(1), _(2)... */
-    private static String uniqueName(Set<String> used, String name) {
-        if (!used.contains(name)) return name;
-        int dot = name.lastIndexOf('.');
-        String base = dot > 0 ? name.substring(0, dot) : name;
-        String ext  = dot > 0 ? name.substring(dot)    : "";
-        int i = 1;
-        String candidate;
-        do { candidate = base + "_(" + i++ + ")" + ext; }
-        while (used.contains(candidate));
-        return candidate;
-    }
 
     private boolean isWriteLimitReached(Throwable t) {
         while (t != null) {

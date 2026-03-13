@@ -32,9 +32,7 @@ import javafx.stage.Popup;
 import org.example.photo.PhotoPdfResult;
 import org.example.photo.PhotoPdfService;
 import org.example.config.SearchConfig;
-import org.example.export.ConflictStrategy;
-import org.example.watcher.FileWatcherService;
-import org.example.export.ExportResult;
+import org.example.export.ExportController;
 import org.example.export.ExportService;
 import org.example.index.IndexRegistry;
 import org.slf4j.Logger;
@@ -60,8 +58,7 @@ public class MainApp extends Application {
     private final SearchConfig config = SearchConfig.load();
     private final ExecutorService backgroundExecutor = Executors.newCachedThreadPool();
     private final IndexRegistry indexRegistry = new IndexRegistry(config.getIndexPath());
-    private final SearchHistoryService searchHistory =
-            new SearchHistoryService(config.getIndexPath());
+    private final ExportController exportController = new ExportController(new ExportService(), backgroundExecutor);
 
     private String hddPath = "";
 
@@ -122,12 +119,6 @@ public class MainApp extends Application {
     private static final String C_DANGER       = "#EF4444";
     private static final String C_DANGER_HOVER = "#DC2626";
 
-    // ─── Активная тема (live-switch) ──────────────────────────────────────────
-    /** Хранит имя текущей темы: "jetbrains" | "win11". Volatile для read из FX-потока. */
-    private volatile String currentTheme;
-    /** Ссылка на корневую сцену для live-переключения темы. */
-    private Scene mainScene;
-
     @Override
     public void start(Stage primaryStage) {
         logger.info("Запуск приложения. Lucene: {}", config.getLuceneVersion());
@@ -175,35 +166,23 @@ public class MainApp extends Application {
         Button btnExport = fluentButton("Экспорт файлов", "secondary");
         Button btnPhotoPdf = fluentButton("Фото → PDF", "secondary");
 
-        // ── OCR ──────────────────────────────────────────────────────────────
-        CheckBox chkOcr = new CheckBox("OCR (Tesseract)");
-        chkOcr.setStyle("-fx-text-fill:" + C_TEXT_SEC + ";-fx-font-size:12px;-fx-font-family:'Segoe UI';");
-        chkOcr.setTooltip(new Tooltip(
-                "Включает распознавание текста на изображениях (JPG, PNG, TIFF)\n" +
-                        "и отсканированных PDF без текстового слоя.\n" +
-                        "Требует установленного Tesseract OCR."));
+        CheckBox chkOcr = new CheckBox("Включить OCR");
+        chkOcr.setSelected(false);
+        chkOcr.getStyleClass().add("compact-check");
 
-        // Метка статуса Tesseract — проверяется один раз при старте в фоне
-        Label lblTesseract = metaLabel("Tesseract: проверка...");
+        Label lblTesseract = new Label("Проверка Tesseract...");
+        lblTesseract.getStyleClass().add("meta-muted");
+
         backgroundExecutor.execute(() -> {
-            boolean available = org.example.tika.TikaService.isTesseractAvailable();
+            boolean ok = org.example.tika.TikaService.isTesseractAvailable();
             Platform.runLater(() -> {
-                if (available) {
-                    lblTesseract.setText("Tesseract: ✓ найден  ·  OCR включён");
-                    lblTesseract.setStyle("-fx-text-fill:#4caf50;-fx-font-size:11px;-fx-font-family:'Segoe UI';");
+                if (ok) {
+                    String path = org.example.tika.TikaService.resolveTesseractPath();
+                    lblTesseract.setText("Tesseract: найден" + (path != null ? "  ·  " + path : ""));
                     chkOcr.setDisable(false);
-                    // Автоматически включаем OCR — пользователю ничего делать не нужно
-                    chkOcr.setSelected(true);
-                    ocrEnabled.set(true);
                 } else {
                     lblTesseract.setText("Tesseract: не установлен  ·  OCR недоступен");
-                    lblTesseract.setStyle("-fx-text-fill:" + C_TEXT_TER + ";-fx-font-size:11px;-fx-font-family:'Segoe UI';");
                     chkOcr.setDisable(true);
-                    chkOcr.setTooltip(new Tooltip(
-                            "Tesseract не найден в PATH.\n" +
-                                    "Установите: https://github.com/tesseract-ocr/tesseract\n" +
-                                    "Языки RU+EN: скачайте rus.traineddata и eng.traineddata\n" +
-                                    "в папку tessdata."));
                 }
             });
         });
@@ -220,50 +199,6 @@ public class MainApp extends Application {
         searchField.setPromptText("Поиск...  (\"фраза\" для точного совпадения)");
         styleTextField(searchField);
         HBox.setHgrow(searchField, Priority.ALWAYS);
-
-        // ── История поиска: выпадающий список ─────────────────────────────────
-        ListView<String> historyList = new ListView<>();
-        historyList.setFocusTraversable(false);
-        historyList.setStyle(
-                "-fx-background-color:" + C_SURFACE + ";"
-                        + "-fx-border-color:" + C_BORDER + ";-fx-border-width:1;"
-                        + "-fx-font-family:'Segoe UI';-fx-font-size:13px;");
-        historyList.setFixedCellSize(30);
-
-        Popup historyPopup = new Popup();
-        historyPopup.setAutoHide(true);
-        historyPopup.setConsumeAutoHidingEvents(false);
-        historyPopup.getContent().add(historyList);
-
-        Runnable refreshHistoryPopup = () -> {
-            String typed = searchField.getText();
-            java.util.List<String> matches = searchHistory.filter(typed);
-            if (matches.isEmpty()) { historyPopup.hide(); return; }
-            historyList.getItems().setAll(matches);
-            int rows = Math.min(matches.size(), 8);
-            historyList.setPrefHeight(rows * 30 + 2);
-            historyList.setPrefWidth(searchField.getWidth() > 0 ? searchField.getWidth() : 420);
-            if (!historyPopup.isShowing()) {
-                javafx.geometry.Bounds b = searchField.localToScreen(searchField.getBoundsInLocal());
-                if (b != null) historyPopup.show(searchField, b.getMinX(), b.getMaxY() + 2);
-            }
-        };
-
-        searchField.focusedProperty().addListener((obs, wasF, isF) -> {
-            if (isF) refreshHistoryPopup.run();
-            else historyPopup.hide();
-        });
-        searchField.textProperty().addListener((obs, oldT, newT) -> {
-            if (searchField.isFocused()) refreshHistoryPopup.run();
-        });
-        historyList.setOnMouseClicked(e -> {
-            String sel = historyList.getSelectionModel().getSelectedItem();
-            if (sel != null) {
-                historyPopup.hide();
-                searchField.setText(sel);
-                performSearch(sel);
-            }
-        });
 
         Button btnSearch = fluentButton("Найти", "accent");
         Button btnSettings = fluentButton("⚙", "secondary");
@@ -332,47 +267,16 @@ public class MainApp extends Application {
 
         btnDeleteIndex.setOnAction(e -> deleteIndexDialog(primaryStage, indexSizeLabel, indexStatusLabel, statusLabel));
         btnSearch.setOnAction(e -> performSearch(searchField.getText()));
-        btnExport.setOnAction(e -> exportResults(primaryStage, statusLabel, pb, btnExport));
+        btnExport.setOnAction(e -> exportController.exportResults(primaryStage, collectUniqueResultPaths(), statusLabel, pb, btnExport, this::showAlert));
         btnPhotoPdf.setOnAction(e -> createPdfFromPhotos(primaryStage));
 
         setupSelectionListener(nameTable, searchField, previewArea, previewTitle, previewPlaceholder, selectedPreview, btnOpenFile, btnOpenFolder);
         setupSelectionListener(contentTable, searchField, previewArea, previewTitle, previewPlaceholder, selectedPreview, btnOpenFile, btnOpenFolder);
 
-        // ── Кнопки «Загрузить ещё» и счётчики для каждой вкладки ────────────
-        btnLoadMoreName    = fluentButton("Загрузить ещё…", "secondary");
-        btnLoadMoreContent = fluentButton("Загрузить ещё…", "secondary");
-        btnLoadMoreName.setVisible(false);
-        btnLoadMoreContent.setVisible(false);
-
-        lblNameCount    = new Label("");
-        lblContentCount = new Label("");
-        String countStyle = "-fx-text-fill:#6B7280;-fx-font-size:11px;-fx-font-family:'Segoe UI';";
-        lblNameCount.setStyle(countStyle);
-        lblContentCount.setStyle(countStyle);
-
-        HBox nameFooter    = new HBox(10, lblNameCount,    btnLoadMoreName);
-        HBox contentFooter = new HBox(10, lblContentCount, btnLoadMoreContent);
-        nameFooter.setAlignment(Pos.CENTER_LEFT);
-        contentFooter.setAlignment(Pos.CENTER_LEFT);
-        nameFooter.setPadding(new Insets(4, 8, 4, 8));
-        contentFooter.setPadding(new Insets(4, 8, 4, 8));
-
-        VBox namePane    = new VBox(0, nameTable,    nameFooter);
-        VBox contentPane = new VBox(0, contentTable, contentFooter);
-        VBox.setVgrow(nameTable,    Priority.ALWAYS);
-        VBox.setVgrow(contentTable, Priority.ALWAYS);
-
-        btnLoadMoreName.setOnAction(e ->
-                loadNextPage("filename", searchField.getText(), nameResults,
-                        lastNameDoc, totalNameHits, lblNameCount, btnLoadMoreName));
-        btnLoadMoreContent.setOnAction(e ->
-                loadNextPage("content", searchField.getText(), contentResults,
-                        lastContentDoc, totalContentHits, lblContentCount, btnLoadMoreContent));
-
         TabPane resultsTabs = new TabPane();
         resultsTabs.getStyleClass().add("results-tabs");
-        Tab nameTab    = new Tab("Совпадения в названии",   namePane);
-        Tab contentTab = new Tab("Совпадения в содержимом", contentPane);
+        Tab nameTab = new Tab("Совпадения в названии", nameTable);
+        Tab contentTab = new Tab("Совпадения в содержимом", contentTable);
         nameTab.setClosable(false);
         contentTab.setClosable(false);
         resultsTabs.getTabs().addAll(nameTab, contentTab);
@@ -383,15 +287,11 @@ public class MainApp extends Application {
 
         VBox topBox = new VBox(topBar, pb);
 
-        lblWatcherStatus = new Label("⚪ нет индекса");
-        lblWatcherStatus.setStyle("-fx-text-fill:" + C_TEXT_TER + ";-fx-font-size:11px;-fx-font-family:'Segoe UI';");
-
         VBox indexPanel = new VBox(8,
                 sectionHeader("ИНДЕКС"),
                 hddLabel,
                 indexStatusLabel,
                 indexSizeLabel,
-                lblWatcherStatus,
                 btnIndex,
                 btnReindex,
                 btnDeleteIndex,
@@ -436,7 +336,6 @@ public class MainApp extends Application {
         primaryStage.widthProperty().addListener(responsive);
 
         Scene scene = new Scene(root, 1280, 820);
-        mainScene = scene;
         configureAccelerators(scene, searchField, btnSearch, btnReindex, btnIndex, statusLabel, nameTable, contentTable);
         applyGlobalStyles(scene);
         // ── Иконка приложения ─────────────────────────────────────────────────────
@@ -981,85 +880,6 @@ public class MainApp extends Application {
     }
 
 
-    // ════════════════════════════════════════════════════════════════════════
-    //  File Watcher — автообновление индекса
-    // ════════════════════════════════════════════════════════════════════════
-
-    /**
-     * Запускает (или перезапускает) File Watcher для указанного пути.
-     * Вызывается после успешной индексации в JavaFX-потоке.
-     */
-    private void startFileWatcher(String sourcePath, Label statusLabel) {
-        FileWatcherService old = activeWatcher.getAndSet(null);
-        if (old != null) {
-            try { old.close(); } catch (Exception ignored) {}
-        }
-
-        updateWatcherStatus(FileWatcherService.IndexStatus.UP_TO_DATE);
-
-        backgroundExecutor.execute(() -> {
-            try {
-                FileWatcherService watcher = new FileWatcherService(
-                        status -> Platform.runLater(() -> updateWatcherStatus(status)),
-                        ()     -> runSilentReindex(sourcePath, statusLabel)
-                );
-                watcher.watchDirectory(java.nio.file.Path.of(sourcePath));
-                watcher.start();
-                activeWatcher.set(watcher);
-                logger.info("FileWatcher запущен для: {}", sourcePath);
-            } catch (Exception e) {
-                logger.warn("Не удалось запустить FileWatcher для {}: {}", sourcePath, e.getMessage());
-            }
-        });
-    }
-
-    /**
-     * Тихая фоновая переиндексация — не блокирует UI-кнопки.
-     * Вызывается автоматически планировщиком FileWatcherService каждые 5 минут.
-     */
-    private void runSilentReindex(String sourcePath, Label statusLabel) {
-        if (sourcePath == null || sourcePath.isBlank()) return;
-
-        String indexDirName = org.example.index.IndexRegistry.buildIndexDirectoryName(sourcePath);
-        java.nio.file.Path targetIndex = config.getIndexPath().resolve(indexDirName);
-
-        Platform.runLater(() -> statusLabel.setText("🔄 Автообновление индекса: " + sourcePath + "..."));
-
-        try {
-            long startMs = System.currentTimeMillis();
-            IndexerService indexer = new IndexerService(config, targetIndex, ocrEnabled.get());
-            indexer.runIncrementalIndexing(sourcePath,
-                    (current, total, fileName) -> {},   // прогресс не отображается (тихий режим)
-                    indexingCancelled::get);
-
-            long docs = indexer.countDocuments();
-            long size = directorySize(targetIndex);
-            indexRegistry.upsert(org.example.index.IndexRegistry.readyEntry(sourcePath, targetIndex, docs, size));
-
-            long sec = (System.currentTimeMillis() - startMs) / 1000;
-            Platform.runLater(() -> {
-                statusLabel.setText("✅ Автообновление завершено за " + formatDuration(sec) + " · " + sourcePath);
-                FileWatcherService w = activeWatcher.get();
-                if (w != null) w.markUpToDate();
-            });
-        } catch (Exception e) {
-            logger.warn("Ошибка автообновления индекса: {}", e.getMessage());
-            Platform.runLater(() -> statusLabel.setText("⚠ Ошибка автообновления: " + e.getMessage()));
-        }
-    }
-
-    /** Обновляет лейбл статуса индекса в сайдбаре. Должен вызываться из FX-потока. */
-    private void updateWatcherStatus(FileWatcherService.IndexStatus status) {
-        if (lblWatcherStatus == null) return;
-        if (status == FileWatcherService.IndexStatus.UP_TO_DATE) {
-            lblWatcherStatus.setText("🟢 актуален");
-            lblWatcherStatus.setStyle("-fx-text-fill:#4CAF50;-fx-font-size:11px;-fx-font-family:'Segoe UI';-fx-font-weight:bold;");
-        } else {
-            lblWatcherStatus.setText("🟡 есть изменения");
-            lblWatcherStatus.setStyle("-fx-text-fill:#FFC107;-fx-font-size:11px;-fx-font-family:'Segoe UI';-fx-font-weight:bold;");
-        }
-    }
-
     /**
      * Рассчитывает и форматирует оставшееся время.
      * Алгоритм: (elapsed / current) * (total - current)
@@ -1142,141 +962,7 @@ public class MainApp extends Application {
         });
     }
 
-    /**
-     * Загружает следующую страницу результатов через {@code searchAfter}.
-     * Вызывается кнопкой «Загрузить ещё».
-     */
-    private void loadNextPage(String field,
-                              String query,
-                              ObservableList<FileResult> results,
-                              AtomicReference<org.apache.lucene.search.ScoreDoc> lastDocRef,
-                              AtomicReference<Long> totalHitsRef,
-                              Label countLabel,
-                              Button loadMoreBtn) {
-        org.apache.lucene.search.ScoreDoc after = lastDocRef.get();
-        if (after == null) return;  // уже загружено всё
 
-        loadMoreBtn.setDisable(true);
-
-        List<Path> indexPaths = indexRegistry.allReadyIndexPaths();
-        if (indexPaths.isEmpty()) return;
-
-        backgroundExecutor.execute(() -> {
-            try (SearchService searcher = new SearchService(config, indexPaths)) {
-                var page = searcher.searchInFieldsPaged(query, field, after);
-                Platform.runLater(() -> {
-                    results.addAll(page.results());
-                    lastDocRef.set(page.lastDoc());
-                    updatePageCounter(countLabel, loadMoreBtn,
-                            results.size(), totalHitsRef.get());
-                });
-            } catch (Exception ex) {
-                Platform.runLater(() -> {
-                    loadMoreBtn.setDisable(false);
-                    showAlert("Ошибка загрузки", ex.getMessage());
-                });
-            }
-        });
-    }
-
-    /**
-     * Обновляет счётчик «Показано X из Y» и видимость кнопки «Загрузить ещё».
-     */
-    private void updatePageCounter(Label countLabel, Button loadMoreBtn,
-                                   int shown, long total) {
-        if (countLabel == null || loadMoreBtn == null) return;
-        if (total == 0) {
-            countLabel.setText("");
-            loadMoreBtn.setVisible(false);
-            return;
-        }
-        countLabel.setText("Показано " + shown + " из " + total);
-        boolean hasMore = shown < total;
-        loadMoreBtn.setVisible(hasMore);
-        loadMoreBtn.setDisable(false);
-    }
-
-    private void exportResults(Stage stage, Label statusLabel, ProgressBar progressBar, Button btnExport) {
-        List<Path> files = collectUniqueResultPaths();
-        if (files.isEmpty()) {
-            showAlert("Экспорт", "Нет найденных файлов для экспорта.");
-            return;
-        }
-
-        ChoiceDialog<String> modeDialog = new ChoiceDialog<>("В папку", "В папку", "В ZIP");
-        modeDialog.setTitle("Экспорт");
-        modeDialog.setHeaderText("Выберите формат экспорта");
-        Optional<String> mode = modeDialog.showAndWait();
-        if (mode.isEmpty()) return;
-
-        ExportService exportService = new ExportService();
-        btnExport.setDisable(true);
-        progressBar.setProgress(0);
-
-        if ("В папку".equals(mode.get())) {
-            DirectoryChooser chooser = new DirectoryChooser();
-            chooser.setTitle("Выберите папку для экспорта");
-            // Открываем в сохранённой папке вложений, если задана
-            String savedAttsPath = config.getAttachmentsOutputPath();
-            if (!savedAttsPath.isBlank()) {
-                try {
-                    File savedDir = new File(savedAttsPath);
-                    if (savedDir.exists() && savedDir.isDirectory()) {
-                        chooser.setInitialDirectory(savedDir);
-                    }
-                } catch (Exception ignored) {}
-            }
-            File targetDir = chooser.showDialog(stage);
-            if (targetDir == null) { btnExport.setDisable(false); return; }
-
-            ChoiceDialog<String> conflictDialog = new ChoiceDialog<>("Переименовать", "Перезаписать", "Пропустить", "Переименовать");
-            conflictDialog.setTitle("Конфликт файлов");
-            conflictDialog.setHeaderText("Если файл уже существует:");
-            Optional<String> conflictAnswer = conflictDialog.showAndWait();
-            if (conflictAnswer.isEmpty()) { btnExport.setDisable(false); return; }
-
-            ConflictStrategy strategy = switch (conflictAnswer.get()) {
-                case "Перезаписать" -> ConflictStrategy.OVERWRITE;
-                case "Пропустить"   -> ConflictStrategy.SKIP;
-                default             -> ConflictStrategy.RENAME;
-            };
-
-            backgroundExecutor.execute(() -> {
-                ExportResult result = exportService.exportToDirectory(files, targetDir.toPath(), strategy,
-                        (processed, total) -> Platform.runLater(() -> {
-                            progressBar.setProgress(total == 0 ? 1 : (double) processed / total);
-                            statusLabel.setText(String.format("Экспорт в папку: %d/%d", processed, total));
-                        }));
-                Platform.runLater(() -> {
-                    btnExport.setDisable(false);
-                    statusLabel.setText(String.format("Экспорт завершен. Успешно: %d, пропущено: %d, ошибок: %d",
-                            result.exported(), result.skipped(), result.failed()));
-                    showAlert("Экспорт завершен", statusLabel.getText());
-                });
-            });
-        } else {
-            FileChooser fileChooser = new FileChooser();
-            fileChooser.setTitle("Сохранить ZIP-архив");
-            fileChooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("ZIP архив", "*.zip"));
-            fileChooser.setInitialFileName("search-results.zip");
-            File zipFile = fileChooser.showSaveDialog(stage);
-            if (zipFile == null) { btnExport.setDisable(false); return; }
-
-            backgroundExecutor.execute(() -> {
-                ExportResult result = exportService.exportToZip(files, zipFile.toPath(),
-                        (processed, total) -> Platform.runLater(() -> {
-                            progressBar.setProgress(total == 0 ? 1 : (double) processed / total);
-                            statusLabel.setText(String.format("Экспорт в ZIP: %d/%d", processed, total));
-                        }));
-                Platform.runLater(() -> {
-                    btnExport.setDisable(false);
-                    statusLabel.setText(String.format("ZIP экспорт завершен. Успешно: %d, ошибок: %d",
-                            result.exported(), result.failed()));
-                    showAlert("Экспорт завершен", statusLabel.getText());
-                });
-            });
-        }
-    }
 
     private void createPdfFromPhotos(Stage owner) {
         DirectoryChooser folderChooser = new DirectoryChooser();
@@ -1490,26 +1176,14 @@ public class MainApp extends Application {
     }
 
     private void applyGlobalStyles(Scene scene) {
-        applyTheme(scene, currentTheme);
-    }
-
-    /**
-     * Применяет (или переключает) тему для указанной сцены.
-     * Безопасно вызывать повторно — предыдущие таблицы стилей очищаются.
-     *
-     * @param scene целевая сцена
-     * @param theme имя темы: {@code "jetbrains"} или {@code "win11"}
-     */
-    private void applyTheme(Scene scene, String theme) {
-        String cssFile = "win11".equalsIgnoreCase(theme) ? "/win11-theme.css" : "/jetbrains-theme.css";
-        java.net.URL url = getClass().getResource(cssFile);
-        if (url == null) {
-            logger.warn("Не найден файл темы: {}", cssFile);
+        String css = getClass().getResource("/jetbrains-theme.css") != null
+                ? getClass().getResource("/jetbrains-theme.css").toExternalForm()
+                : null;
+        if (css == null) {
+            logger.warn("Не найден файл темы: /jetbrains-theme.css");
             return;
         }
-        scene.getStylesheets().clear();
-        scene.getStylesheets().add(url.toExternalForm());
-        logger.info("Тема применена: {}", cssFile);
+        scene.getStylesheets().add(css);
     }
 
 
@@ -1701,20 +1375,6 @@ public class MainApp extends Application {
 
                 String keyword = searchField.getText();
                 String path = newSel.getPath();
-
-                // Отменяем предыдущий предпросмотр — без этого при быстрых кликах
-                // плодятся потоки и показывается предпросмотр «не того» файла
-                java.util.concurrent.Future<?> prev = previewFuture.getAndSet(null);
-                if (prev != null && !prev.isDone()) prev.cancel(true);
-
-                // Показываем «загрузка» немедленно
-                preview.getEngine().loadContent(
-                        "<html><body style='background:#121417;color:#555;font-family:Segoe UI;" +
-                                "padding:16px;'>Загрузка предпросмотра…</body></html>");
-
-                java.util.concurrent.Future<?> future = backgroundExecutor.submit(() -> {
-                    // Проверяем прерывание — если Future был отменён, не тратим время
-                    if (Thread.currentThread().isInterrupted()) return;
 
                     String htmlSnippets;
                     try (SearchService svc = new SearchService(config, indexRegistry.allReadyIndexPaths())) {
